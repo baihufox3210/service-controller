@@ -40,13 +40,9 @@ def _parse_bool(raw: str | None, key: str, *, default: bool) -> bool:
 class Settings:
     token: str
     services_file: Path = Path("database/service.json")
+    permissions_file: Path = Path("database/permissions.json")
     allowed_guild_ids: frozenset[int] = field(default_factory=frozenset)
-    admin_user_ids: frozenset[int] = field(default_factory=frozenset)
-    admin_role_ids: frozenset[int] = field(default_factory=frozenset)
-    operator_user_ids: frozenset[int] = field(default_factory=frozenset)
-    operator_role_ids: frozenset[int] = field(default_factory=frozenset)
-    viewer_user_ids: frozenset[int] = field(default_factory=frozenset)
-    viewer_role_ids: frozenset[int] = field(default_factory=frozenset)
+    owner_user_ids: frozenset[int] = field(default_factory=frozenset)
     sudo_path: str = "/usr/bin/sudo"
     systemctl_path: str = "/usr/bin/systemctl"
     journalctl_path: str = "/usr/bin/journalctl"
@@ -70,13 +66,9 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
     return Settings(
         token=token,
         services_file=Path(env.get("SERVICES_FILE") or "database/service.json"),
+        permissions_file=Path(env.get("PERMISSIONS_FILE") or "database/permissions.json"),
         allowed_guild_ids=ids("ALLOWED_GUILD_IDS"),
-        admin_user_ids=ids("ADMIN_USER_IDS"),
-        admin_role_ids=ids("ADMIN_ROLE_IDS"),
-        operator_user_ids=ids("OPERATOR_USER_IDS"),
-        operator_role_ids=ids("OPERATOR_ROLE_IDS"),
-        viewer_user_ids=ids("VIEWER_USER_IDS"),
-        viewer_role_ids=ids("VIEWER_ROLE_IDS"),
+        owner_user_ids=ids("OWNER_USER_IDS"),
         sudo_path=env.get("SUDO_PATH") or "/usr/bin/sudo",
         systemctl_path=env.get("SYSTEMCTL_PATH") or "/usr/bin/systemctl",
         journalctl_path=env.get("JOURNALCTL_PATH") or "/usr/bin/journalctl",

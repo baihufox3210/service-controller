@@ -1,5 +1,5 @@
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 
 
@@ -8,7 +8,15 @@ class Backend(StrEnum):
     DOCKER = "docker"
 
 
-# 服務顯示名稱：英數、底線、連字號，避免 Markdown / mention 注入
+class Action(StrEnum):
+    START = "start"
+    STOP = "stop"
+    RESTART = "restart"
+    ENABLE = "enable"
+    DISABLE = "disable"
+
+
+# 服務名稱：英數、底線、連字號，避免 Markdown / mention 注入
 NAME_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,32}")
 
 # 所有 target 都不可以 "-" 開頭，避免被當成命令列選項
@@ -24,42 +32,45 @@ class InvalidServiceError(ValueError):
     pass
 
 
-def is_valid_name(name: str) -> bool:
-    return isinstance(name, str) and NAME_PATTERN.fullmatch(name) is not None
-
-
-def is_valid_target(backend: Backend, target: str) -> bool:
-    pattern = TARGET_PATTERNS.get(backend)
-
-    return pattern is not None and isinstance(target, str) and pattern.fullmatch(target) is not None
-
-
 def validate_target(backend: Backend, target: str) -> str:
-    if not is_valid_target(backend, target):
-        raise InvalidServiceError(f"Invalid {backend} target: {target!r}")
+    if not isinstance(target, str) or TARGET_PATTERNS[backend].fullmatch(target) is None:
+        raise InvalidServiceError(f"無效的 {backend} 名稱：{target!r}")
 
     return target
 
 
-def parse_backend(value: str) -> Backend:
-    try:
-        return Backend(value)
-
-    except ValueError:
-        raise InvalidServiceError(f"Unknown backend: {value!r}") from None
-
-
 @dataclass(slots=True)
 class Service:
+    """一個服務可以同時對應 systemd unit 與 Docker 容器。"""
+
     name: str
-    target: str
-    backend: Backend = Backend.SYSTEMD
+    targets: dict[Backend, str] = field(default_factory=dict)
 
     def __post_init__(self):
-        if not is_valid_name(self.name):
-            raise InvalidServiceError(
-                f"Invalid service name: {self.name!r} (allowed: A-Z a-z 0-9 _ -, max 32 chars)"
-            )
+        if not isinstance(self.name, str) or NAME_PATTERN.fullmatch(self.name) is None:
+            raise InvalidServiceError(f"無效的服務名稱：{self.name!r}（僅限 A-Z a-z 0-9 _ -，最多 32 字）")
 
-        self.backend = parse_backend(self.backend)
-        validate_target(self.backend, self.target)
+        try:
+            targets = {Backend(backend): target for backend, target in self.targets.items()}
+
+        except ValueError as e:
+            raise InvalidServiceError(f"未知的後端：{e}") from None
+
+        if not targets:
+            raise InvalidServiceError("至少需要設定 systemd unit 或 Docker 容器其中之一")
+
+        for backend, target in targets.items():
+            validate_target(backend, target)
+
+        # 固定順序：systemd 在前、docker 在後
+        self.targets = {backend: targets[backend] for backend in Backend if backend in targets}
+
+    def select(self, scope: Backend | None = None) -> list[tuple[Backend, str]]:
+        """scope 為 None 代表全部已設定的後端。"""
+        if scope is None:
+            return list(self.targets.items())
+
+        if scope not in self.targets:
+            raise InvalidServiceError(f"服務 {self.name} 未設定 {scope}")
+
+        return [(scope, self.targets[scope])]

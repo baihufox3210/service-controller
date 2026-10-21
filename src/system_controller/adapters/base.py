@@ -3,7 +3,7 @@ import contextlib
 from dataclasses import dataclass
 from typing import Protocol
 
-from system_controller.models.service import Backend, InvalidServiceError, validate_target
+from system_controller.models.service import Action, Backend, InvalidServiceError, validate_target
 
 MAX_LOG_LINES = 500
 
@@ -26,11 +26,7 @@ class BackendState:
 
 
 class ServiceBackend(Protocol):
-    async def start(self, target: str) -> CommandResult: ...
-    async def stop(self, target: str) -> CommandResult: ...
-    async def restart(self, target: str) -> CommandResult: ...
-    async def enable(self, target: str) -> CommandResult: ...
-    async def disable(self, target: str) -> CommandResult: ...
+    async def control(self, action: Action, target: str) -> CommandResult: ...
     async def state(self, target: str) -> BackendState: ...
     async def logs(self, target: str, lines: int = 50) -> CommandResult: ...
 
@@ -61,7 +57,7 @@ class CommandAdapter:
                 process.communicate(), timeout=timeout
             )
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             # 逾時後必須終止子程序，否則會留下殭屍程序
             with contextlib.suppress(ProcessLookupError):
                 process.kill()

@@ -1,9 +1,17 @@
 from system_controller.adapters.base import BackendState, CommandAdapter, CommandResult, clamp_lines
-from system_controller.models.service import Backend
+from system_controller.models.service import Action, Backend
 
 # 「開機自動啟動」在 Docker 中對應容器的 restart policy
 ENABLED_RESTART_POLICY = "unless-stopped"
 DISABLED_RESTART_POLICY = "no"
+
+ACTION_ARGS: dict[Action, tuple[str, ...]] = {
+    Action.START: ("start",),
+    Action.STOP: ("stop",),
+    Action.RESTART: ("restart",),
+    Action.ENABLE: ("update", f"--restart={ENABLED_RESTART_POLICY}"),
+    Action.DISABLE: ("update", f"--restart={DISABLED_RESTART_POLICY}"),
+}
 
 
 class DockerAdapter(CommandAdapter):
@@ -30,20 +38,8 @@ class DockerAdapter(CommandAdapter):
 
         return await self._run(*command, timeout=timeout, merge_stderr=merge_stderr)
 
-    async def start(self, container: str) -> CommandResult:
-        return await self._docker("start", container=container)
-
-    async def stop(self, container: str) -> CommandResult:
-        return await self._docker("stop", container=container)
-
-    async def restart(self, container: str) -> CommandResult:
-        return await self._docker("restart", container=container)
-
-    async def enable(self, container: str) -> CommandResult:
-        return await self._docker("update", f"--restart={ENABLED_RESTART_POLICY}", container=container)
-
-    async def disable(self, container: str) -> CommandResult:
-        return await self._docker("update", f"--restart={DISABLED_RESTART_POLICY}", container=container)
+    async def control(self, action: Action, container: str) -> CommandResult:
+        return await self._docker(*ACTION_ARGS[Action(action)], container=container)
 
     async def state(self, container: str) -> BackendState:
         result = await self._docker(

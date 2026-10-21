@@ -18,9 +18,6 @@ def main() -> None:
         print(f"設定錯誤：{e}", file=sys.stderr)
         sys.exit(1)
 
-    if not (settings.admin_user_ids or settings.admin_role_ids):
-        logging.warning("未設定任何管理員（ADMIN_USER_IDS / ADMIN_ROLE_IDS），將無人能新增或移除服務。")
-
     Bot(settings).run(settings.token, log_handler=None)
 
 

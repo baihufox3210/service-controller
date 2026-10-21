@@ -14,27 +14,22 @@ def test_accepts_legacy_token_key():
     assert load_settings({"bot_token": "abc"}).token == "abc"
 
 
-def test_parses_ids_and_options():
+def test_parses_options():
     settings = load_settings({
         "BOT_TOKEN": "abc",
-        "ADMIN_USER_IDS": "1, 2,,3",
-        "OPERATOR_ROLE_IDS": "44",
-        "SERVICES_FILE": "/var/lib/sc/services.json",
+        "OWNER_USER_IDS": "1, 2,,3",
+        "ALLOWED_GUILD_IDS": "44",
+        "PERMISSIONS_FILE": "/var/lib/sc/permissions.json",
         "DOCKER_USE_SUDO": "false",
     })
 
-    assert settings.admin_user_ids == {1, 2, 3}
-    assert settings.operator_role_ids == {44}
-    assert settings.viewer_user_ids == frozenset()
-    assert settings.services_file == Path("/var/lib/sc/services.json")
+    assert settings.owner_user_ids == {1, 2, 3}
+    assert settings.allowed_guild_ids == {44}
+    assert settings.permissions_file == Path("/var/lib/sc/permissions.json")
     assert settings.docker_use_sudo is False
 
 
-@pytest.mark.parametrize("env", [
-    {"ADMIN_USER_IDS": "12a"},
-    {"VIEWER_ROLE_IDS": "-1"},
-    {"DOCKER_USE_SUDO": "maybe"},
-])
+@pytest.mark.parametrize("env", [{"OWNER_USER_IDS": "12a"}, {"ALLOWED_GUILD_IDS": "-1"}, {"DOCKER_USE_SUDO": "maybe"}])
 def test_rejects_invalid_values(env):
     with pytest.raises(ConfigError):
         load_settings({"BOT_TOKEN": "abc", **env})

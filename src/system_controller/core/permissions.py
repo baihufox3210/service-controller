@@ -1,26 +1,10 @@
 from collections.abc import Iterable
-from enum import IntEnum
 
 import discord
 from discord import app_commands
 
-from system_controller.core.config import Settings
-
-
-class Permission(IntEnum):
-    NONE = 0
-    VIEWER = 1      # list / status / logs
-    OPERATOR = 2    # start / stop / restart / enable / disable
-    ADMIN = 3       # add / remove
-
-    @property
-    def label(self) -> str:
-        return {
-            Permission.NONE: "無",
-            Permission.VIEWER: "檢視者",
-            Permission.OPERATOR: "操作者",
-            Permission.ADMIN: "管理員",
-        }[self]
+from system_controller.models.permission import Permission
+from system_controller.repositories.permission_repository import PermissionRepository
 
 
 class PermissionDenied(app_commands.CheckFailure):
@@ -36,43 +20,42 @@ class GuildNotAllowed(app_commands.CheckFailure):
 
 
 class PermissionPolicy:
-    """預設拒絕：未列在設定中的使用者 / 身分組沒有任何權限。"""
+    """預設拒絕：擁有者來自設定檔，其餘權限來自 PermissionRepository 的授權。"""
 
-    def __init__(self, settings: Settings):
-        self.allowed_guild_ids = settings.allowed_guild_ids
-        self._users = {
-            Permission.ADMIN: settings.admin_user_ids,
-            Permission.OPERATOR: settings.operator_user_ids,
-            Permission.VIEWER: settings.viewer_user_ids,
-        }
-        self._roles = {
-            Permission.ADMIN: settings.admin_role_ids,
-            Permission.OPERATOR: settings.operator_role_ids,
-            Permission.VIEWER: settings.viewer_role_ids,
-        }
+    def __init__(self, repository: PermissionRepository, owner_ids: Iterable[int] = (), allowed_guild_ids: Iterable[int] = ()):
+        self.repository = repository
+        self.owner_ids = set(owner_ids)
+        self.allowed_guild_ids = frozenset(allowed_guild_ids)
 
     def guild_allowed(self, guild_id: int | None) -> bool:
         if guild_id is None: return False
-        if not self.allowed_guild_ids: return True
 
-        return guild_id in self.allowed_guild_ids
+        return not self.allowed_guild_ids or guild_id in self.allowed_guild_ids
 
-    def level_for(self, user_id: int, role_ids: Iterable[int], guild_id: int | None) -> Permission:
+    def level_for(self, user_id: int, role_ids: Iterable[int], guild_id: int | None, service: str | None = None) -> Permission:
+        """service 有值時，會一併套用該服務的單獨授權；取最高權限。"""
         if not self.guild_allowed(guild_id): return Permission.NONE
+        if user_id in self.owner_ids: return Permission.OWNER
 
-        role_ids = set(role_ids)
+        grants = self.repository.matching(user_id, role_ids, service)
 
-        for level in (Permission.ADMIN, Permission.OPERATOR, Permission.VIEWER):
-            if user_id in self._users[level] or role_ids & self._roles[level]:
-                return level
+        return max((grant.level for grant in grants), default=Permission.NONE)
 
-        return Permission.NONE
+    def level_for_interaction(self, interaction: discord.Interaction, service: str | None = None) -> Permission:
+        role_ids = [role.id for role in getattr(interaction.user, "roles", [])]
 
-    def level_for_interaction(self, interaction: discord.Interaction) -> Permission:
-        user = interaction.user
-        role_ids = [role.id for role in getattr(user, "roles", [])]
+        return self.level_for(interaction.user.id, role_ids, interaction.guild_id, service)
 
-        return self.level_for(user.id, role_ids, interaction.guild_id)
+    def ensure(self, interaction: discord.Interaction, level: Permission, service: str | None = None) -> Permission:
+        if not self.guild_allowed(interaction.guild_id):
+            raise GuildNotAllowed()
+
+        actual = self.level_for_interaction(interaction, service)
+
+        if actual < level:
+            raise PermissionDenied(level, actual)
+
+        return actual
 
 
 def get_policy(interaction: discord.Interaction) -> PermissionPolicy:
@@ -84,17 +67,11 @@ def get_policy(interaction: discord.Interaction) -> PermissionPolicy:
     return policy
 
 
-def require(level: Permission):
+def require(level: Permission, *, per_service: bool = False):
+    """per_service=True 時，以指令的 service 參數套用單一服務授權。"""
     async def predicate(interaction: discord.Interaction) -> bool:
-        policy = get_policy(interaction)
-
-        if not policy.guild_allowed(interaction.guild_id):
-            raise GuildNotAllowed()
-
-        actual = policy.level_for_interaction(interaction)
-
-        if actual < level:
-            raise PermissionDenied(level, actual)
+        service = getattr(interaction.namespace, "service", None) if per_service else None
+        get_policy(interaction).ensure(interaction, level, service)
 
         return True
 

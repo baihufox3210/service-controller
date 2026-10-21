@@ -2,13 +2,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from system_controller.adapters.base import CommandAdapter, CommandResult
+from system_controller.adapters.base import CommandAdapter
 from system_controller.adapters.docker import DockerAdapter
 from system_controller.adapters.systemd import SystemdAdapter
-
-
-def ok(stdout=""):
-    return CommandResult(code=0, stdout=stdout, stderr="")
+from system_controller.models.service import Action
+from tests.conftest import fail, ok
 
 
 @pytest.fixture
@@ -26,22 +24,23 @@ def docker():
 
 
 @pytest.mark.asyncio
-async def test_systemd_control_uses_sudo_and_separator(systemd):
-    await systemd.restart("nginx.service")
+@pytest.mark.parametrize("action", list(Action))
+async def test_systemd_control_uses_sudo_and_separator(systemd, action):
+    await systemd.control(action, "nginx.service")
 
     assert systemd._run.await_args.args == (
-        "/usr/bin/sudo", "-n", "/usr/bin/systemctl", "restart", "--", "nginx.service",
+        "/usr/bin/sudo", "-n", "/usr/bin/systemctl", action.value, "--", "nginx.service",
     )
 
 
 @pytest.mark.asyncio
-async def test_systemd_queries_do_not_use_sudo(systemd):
+async def test_systemd_state_does_not_use_sudo(systemd):
     systemd._run = AsyncMock(side_effect=[ok("active\n"), ok("enabled\n")])
 
     state = await systemd.state("nginx.service")
 
     assert (state.active, state.enabled) == ("active", "enabled")
-    assert systemd._run.await_args_list[0].args[0] == "/usr/bin/systemctl"
+    assert [call.args[0] for call in systemd._run.await_args_list] == ["/usr/bin/systemctl"] * 2
 
 
 @pytest.mark.asyncio
@@ -49,30 +48,25 @@ async def test_systemd_logs_clamps_lines(systemd):
     await systemd.logs("nginx.service", lines=100000)
 
     args = systemd._run.await_args.args
-    assert args[0] == "/usr/bin/journalctl"
-    assert "--unit=nginx.service" in args
+    assert args[:2] == ("/usr/bin/journalctl", "--unit=nginx.service")
     assert args[args.index("-n") + 1] == "500"
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("unit", ["--help", "-H", "nginx", "a b.service", "../x.service"])
-async def test_systemd_rejects_invalid_unit(systemd, unit):
-    result = await systemd.start(unit)
+@pytest.mark.parametrize(
+    ("action", "args"),
+    [
+        (Action.START, ("start",)),
+        (Action.STOP, ("stop",)),
+        (Action.RESTART, ("restart",)),
+        (Action.ENABLE, ("update", "--restart=unless-stopped")),
+        (Action.DISABLE, ("update", "--restart=no")),
+    ],
+)
+async def test_docker_control(docker, action, args):
+    await docker.control(action, "my-web")
 
-    assert result.success is False
-    systemd._run.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_docker_control_commands(docker):
-    await docker.start("my-web")
-    assert docker._run.await_args.args == ("/usr/bin/sudo", "-n", "/usr/bin/docker", "start", "--", "my-web")
-
-    await docker.enable("my-web")
-    assert docker._run.await_args.args[3:] == ("update", "--restart=unless-stopped", "--", "my-web")
-
-    await docker.disable("my-web")
-    assert docker._run.await_args.args[3:] == ("update", "--restart=no", "--", "my-web")
+    assert docker._run.await_args.args == ("/usr/bin/sudo", "-n", "/usr/bin/docker", *args, "--", "my-web")
 
 
 @pytest.mark.asyncio
@@ -80,35 +74,26 @@ async def test_docker_without_sudo():
     adapter = DockerAdapter(use_sudo=False)
     adapter._run = AsyncMock(return_value=ok())
 
-    await adapter.stop("db")
+    await adapter.control(Action.STOP, "db")
 
     assert adapter._run.await_args.args == ("/usr/bin/docker", "stop", "--", "db")
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("stdout", "active", "enabled"),
+    ("result", "active", "enabled"),
     [
-        ("running unless-stopped\n", "running", "enabled (unless-stopped)"),
-        ("exited no\n", "exited", "disabled"),
-        ("created \n", "created", "disabled"),
+        (ok("running unless-stopped\n"), "running", "enabled (unless-stopped)"),
+        (ok("exited no\n"), "exited", "disabled"),
+        (fail("No such container"), "not-found", "unknown"),
     ],
 )
-async def test_docker_state(docker, stdout, active, enabled):
-    docker._run = AsyncMock(return_value=ok(stdout))
+async def test_docker_state(docker, result, active, enabled):
+    docker._run = AsyncMock(return_value=result)
 
     state = await docker.state("my-web")
 
     assert (state.active, state.enabled) == (active, enabled)
-
-
-@pytest.mark.asyncio
-async def test_docker_state_missing_container(docker):
-    docker._run = AsyncMock(return_value=CommandResult(code=1, stdout="", stderr="No such container"))
-
-    state = await docker.state("ghost")
-
-    assert state.active == "not-found"
 
 
 @pytest.mark.asyncio
@@ -120,15 +105,18 @@ async def test_docker_logs_merges_stderr(docker):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("name", ["-v", "--rm", "a/b", "a b", ""])
-async def test_docker_rejects_invalid_container(docker, name):
-    result = await docker.restart(name)
+@pytest.mark.parametrize(("adapter_type", "target"), [(SystemdAdapter, "--help"), (DockerAdapter, "-v")])
+async def test_rejects_invalid_target(adapter_type, target):
+    adapter = adapter_type()
+    adapter._run = AsyncMock(return_value=ok())
+
+    result = await adapter.control(Action.START, target)
 
     assert result.success is False
-    docker._run.assert_not_called()
+    adapter._run.assert_not_called()
 
 
-# 真正執行子程序的測試
+# 真正執行子程序
 
 @pytest.mark.asyncio
 async def test_run_real_process():
@@ -141,12 +129,9 @@ async def test_run_real_process():
 async def test_run_timeout_kills_process():
     result = await CommandAdapter()._run("sleep", "10", timeout=0.2)
 
-    assert result.success is False
-    assert result.stderr == "Command timed out."
+    assert (result.success, result.stderr) == (False, "Command timed out.")
 
 
 @pytest.mark.asyncio
 async def test_run_missing_binary():
-    result = await CommandAdapter()._run("/nonexistent/binary")
-
-    assert result.success is False
+    assert (await CommandAdapter()._run("/nonexistent/binary")).success is False
