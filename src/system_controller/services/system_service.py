@@ -31,6 +31,7 @@ class BackendStatus:
     target: str
     active: str
     enabled: str
+    error: str | None = None
 
 
 class SystemService:
@@ -88,7 +89,7 @@ class SystemService:
 
         for backend, target in self._require(name).select(scope):
             state = await self.backends[backend].state(target)
-            statuses.append(BackendStatus(backend, target, state.active, state.enabled))
+            statuses.append(BackendStatus(backend, target, state.active, state.enabled, state.error))
 
         return statuses
 

@@ -1,0 +1,57 @@
+# /etc/apparmor.d/service-controller
+# 以 Docker 的 docker-default profile 為基礎，額外允許透過系統 D-Bus 與 systemd 通訊。
+# 安裝：
+#   sudo cp deploy/apparmor/service-controller /etc/apparmor.d/service-controller
+#   sudo apparmor_parser -r -W /etc/apparmor.d/service-controller
+
+#include <tunables/global>
+
+profile service-controller flags=(attach_disconnected,mediate_deleted) {
+  #include <abstractions/base>
+
+  network,
+  capability,
+  file,
+  umount,
+
+  # 允許主機、runc / crun 與容器內行程傳送訊號（docker stop 等）
+  signal (receive) peer=unconfined,
+  signal (receive) peer=runc,
+  signal (receive) peer=crun,
+  signal (send,receive) peer=service-controller,
+
+  # 以下與 docker-default 相同：禁止寫入敏感的 /proc 與 /sys
+  deny @{PROC}/* w,
+  deny @{PROC}/{[^1-9],[^1-9][^0-9],[^1-9s][^0-9y][^0-9s],[^1-9][^0-9][^0-9][^0-9/]*}/** w,
+  deny @{PROC}/sys/[^k]** w,
+  deny @{PROC}/sys/kernel/{?,??,[^s][^h][^m]**} w,
+  deny @{PROC}/sysrq-trigger rwklx,
+  deny @{PROC}/kcore rwklx,
+
+  deny mount,
+
+  deny /sys/[^f]*/** wklx,
+  deny /sys/f[^s]*/** wklx,
+  deny /sys/fs/[^c]*/** wklx,
+  deny /sys/fs/c[^g]*/** wklx,
+  deny /sys/fs/cg[^r]*/** wklx,
+  deny /sys/firmware/** rwklx,
+  deny /sys/devices/virtual/powercap/** rwklx,
+  deny /sys/kernel/security/** rwklx,
+
+  ptrace (trace,read,tracedby,readby) peer=service-controller,
+
+  # 系統 D-Bus：只允許與 bus 本身（Hello、AddMatch 等）及 systemd 通訊
+  dbus send
+       bus=system
+       path=/org/freedesktop/DBus
+       interface=org.freedesktop.DBus
+       peer=(name=org.freedesktop.DBus),
+
+  dbus send
+       bus=system
+       peer=(name=org.freedesktop.systemd1),
+
+  # 接收回覆與 systemd 的 JobRemoved 等訊號（start / stop 會等待工作完成）
+  dbus receive bus=system,
+}

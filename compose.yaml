@@ -30,6 +30,8 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+      # Docker 預設的 docker-default profile 會擋掉 D-Bus，需先在主機載入 deploy/apparmor/service-controller
+      - apparmor=${APPARMOR_PROFILE:-service-controller}
     pids_limit: 128
     mem_limit: 256m
 

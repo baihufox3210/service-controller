@@ -38,7 +38,7 @@ class DockerAdapter(CommandAdapter):
         )
 
         if not result.success:
-            return BackendState(active="not-found", enabled="unknown")
+            return BackendState(active="not-found", enabled="unknown", error=result.stderr.strip() or "查詢失敗")
 
         status, _, policy = result.stdout.strip().partition(" ")
         policy = policy or DISABLED_RESTART_POLICY

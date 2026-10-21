@@ -2,7 +2,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from system_controller.adapters.base import CommandAdapter
+from system_controller.adapters.base import CommandAdapter, CommandResult
 from system_controller.adapters.docker import DockerAdapter
 from system_controller.adapters.systemd import SystemdAdapter
 from system_controller.models.service import Action
@@ -125,3 +125,22 @@ async def test_run_timeout_kills_process():
 @pytest.mark.asyncio
 async def test_run_missing_binary():
     assert (await CommandAdapter()._run("/nonexistent/binary")).success is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("results", "active", "error"),
+    [
+        # 服務停止：is-active 回傳 3 但仍輸出狀態，不算查詢失敗
+        ([CommandResult(3, "inactive\n", ""), ok("disabled\n")], "inactive", None),
+        # D-Bus 被拒絕：沒有輸出，只有錯誤訊息
+        ([CommandResult(1, "", "Failed to retrieve unit state: Access denied\n")] * 2, "unknown",
+         "Failed to retrieve unit state: Access denied"),
+    ],
+)
+async def test_systemd_state_reports_query_errors(systemd, results, active, error):
+    systemd._run = AsyncMock(side_effect=results)
+
+    state = await systemd.state("nginx.service")
+
+    assert (state.active, state.error) == (active, error)

@@ -23,6 +23,7 @@ class CommandResult:
 class BackendState:
     active: str
     enabled: str
+    error: str | None = None  # 無法查詢狀態時的錯誤訊息
 
 
 class ServiceBackend(Protocol):

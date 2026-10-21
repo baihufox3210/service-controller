@@ -88,6 +88,15 @@ sudo cp deploy/polkit/50-service-controller.rules /etc/polkit-1/rules.d/
 - ⚠️ 此規則等同讓 `svcbot` 擁有主機 root 權限，請妥善保護 `BOT_TOKEN`。
 - 日誌需要主機啟用持久化 journal（`/var/log/journal` 存在）。
 
+**使用 AppArmor 的主機（Ubuntu、Debian 等）** 還需要載入專用 profile。Docker 預設的 `docker-default` profile 會擋掉容器的 D-Bus 通訊，查詢狀態會出現 `Access denied`：
+
+```bash
+sudo cp deploy/apparmor/service-controller /etc/apparmor.d/service-controller
+sudo apparmor_parser -r -W /etc/apparmor.d/service-controller
+```
+
+`compose.yaml` 預設使用這個 profile（`APPARMOR_PROFILE`）。主機沒有 AppArmor 時 Docker 會忽略此設定。
+
 ### 3. 啟動
 
 ```bash

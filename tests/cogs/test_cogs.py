@@ -211,5 +211,21 @@ async def test_add_without_suffix_defaults_to_service(client, services):
     assert "`baihu-blog-api.service`" in reply(interaction)
 
 
+@pytest.mark.asyncio
+async def test_status_shows_query_error(client, services):
+    from system_controller.adapters.base import BackendState
+
+    backends = client.system_service.backends
+    backends[Backend.SYSTEMD].state = AsyncMock(return_value=BackendState("unknown", "unknown", "Access denied"))
+    backends[Backend.DOCKER].state = AsyncMock(return_value=BackendState("running", "disabled"))
+    interaction = make_interaction(client, OWNER)
+
+    await services.status.callback(services, interaction, "web", "all")
+
+    embed = interaction.followup.send.await_args.kwargs["embed"]
+    assert embed.color == embeds.Color.FAILURE
+    assert "無法查詢狀態" in embed.fields[0].value and "Access denied" in embed.fields[0].value
+
+
 def test_code_block_cannot_be_escaped():
     assert code_block("a```b") == "```\na`​``b\n```"
