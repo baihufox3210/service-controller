@@ -22,7 +22,7 @@
 
 | 後端 | target | enable / disable 的意義 | 日誌來源 |
 | --- | --- | --- | --- |
-| `systemd` | unit 名稱，限 `.service` / `.socket` / `.timer`，例如 `nginx.service` | `systemctl enable/disable` | `journalctl --unit` |
+| `systemd` | unit 名稱，例如 `nginx`（自動補上 `.service`）；也可明確指定 `.socket` / `.timer`，其他類型（如 `.target`、`.mount`）會被拒絕 | `systemctl enable/disable` | `journalctl --unit` |
 | `docker` | 容器名稱，例如 `my-web` | restart policy 設為 `unless-stopped` / `no` | `docker logs` |
 
 ### `/access` — 權限管理
@@ -100,7 +100,7 @@ docker compose logs -f
 ```
 /access grant @維運組 admin
 /access grant @網站組 operator service:web
-/service add name:web unit:web.service container:web
+/service add name:web unit:web container:web
 ```
 
 資料存在 named volume `data`，更新映像檔不會遺失；備份可用：

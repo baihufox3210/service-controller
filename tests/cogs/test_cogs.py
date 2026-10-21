@@ -7,6 +7,7 @@ from discord.ext import commands
 
 from system_controller.cogs.access import Access
 from system_controller.cogs.system import Services
+from system_controller.core import embeds
 from system_controller.core.interactions import code_block
 from system_controller.core.permissions import PermissionDenied, PermissionPolicy
 from system_controller.models.permission import Grant, Permission, SubjectType
@@ -14,7 +15,7 @@ from system_controller.models.service import Backend
 from system_controller.repositories.permission_repository import PermissionRepository
 from system_controller.repositories.service_repository import ServiceRepository
 from system_controller.services.system_service import SystemService
-from tests.conftest import fail, make_interaction, ok
+from tests.conftest import fail, make_interaction, ok, sent_text
 
 OWNER, ADMIN, OTHER_ADMIN, USER = 1, 2, 3, 4
 
@@ -55,7 +56,7 @@ def role(role_id):
 
 
 def reply(interaction):
-    return interaction.response.send_message.await_args.args[0]
+    return sent_text(interaction.response.send_message)
 
 
 def test_commands_are_guarded(services, access):
@@ -122,10 +123,12 @@ async def test_control_output_lists_each_backend(client, services):
 
     await services.restart.callback(services, interaction, "web", "all")
 
-    message = interaction.followup.send.await_args.args[0]
-    assert "✅ `systemd` `web.service`" in message
-    assert "❌ `docker` `web`" in message
-    assert "No such container" in message
+    embed = interaction.followup.send.await_args.kwargs["embed"]
+    assert embed.title == "部分重啟失敗"
+    assert embed.color == embeds.Color.WARNING
+    assert [field.name for field in embed.fields] == ["systemd · web.service", "docker · web"]
+    assert embed.fields[0].value == "成功"
+    assert "No such container" in embed.fields[1].value
 
 
 @pytest.mark.asyncio
@@ -146,6 +149,66 @@ async def test_list_only_shows_visible_services(client, services):
     await services.service_list.callback(services, interaction)
 
     assert "db" in reply(interaction) and "web" not in reply(interaction)
+
+
+@pytest.mark.asyncio
+async def test_logs_shows_each_backend(client, services):
+    backends = client.system_service.backends
+    backends[Backend.SYSTEMD].logs = AsyncMock(return_value=ok("api started\n"))
+    backends[Backend.DOCKER].logs = AsyncMock(return_value=fail("No such container"))
+    interaction = make_interaction(client, OWNER)
+
+    await services.logs.callback(services, interaction, "web", "all", 50)
+
+    kwargs = interaction.followup.send.await_args.kwargs
+    assert kwargs["ephemeral"] is True
+    assert kwargs["files"] == []
+    assert [embed.author.name for embed in kwargs["embeds"]] == ["systemd · web.service", "docker · web"]
+    assert "api started" in kwargs["embeds"][0].description
+    assert "No such container" in kwargs["embeds"][1].description
+
+
+@pytest.mark.asyncio
+async def test_long_logs_keep_latest_lines_and_attach_file(client, services):
+    content = "\n".join(f"line {i}" for i in range(2000))
+    client.system_service.backends[Backend.SYSTEMD].logs = AsyncMock(return_value=ok(content))
+    interaction = make_interaction(client, OWNER)
+
+    await services.logs.callback(services, interaction, "web", "systemd", 500)
+
+    kwargs = interaction.followup.send.await_args.kwargs
+    description = kwargs["embeds"][0].description
+
+    assert len(description) <= 4096
+    assert "line 1999" in description and "line 0\n" not in description
+    assert len(kwargs["files"]) == 1 and kwargs["files"][0].filename == "web_logs.txt"
+
+
+@pytest.mark.asyncio
+async def test_status_embed(client, services):
+    from system_controller.adapters.base import BackendState
+
+    backends = client.system_service.backends
+    backends[Backend.SYSTEMD].state = AsyncMock(return_value=BackendState("active", "enabled"))
+    backends[Backend.DOCKER].state = AsyncMock(return_value=BackendState("exited", "disabled"))
+    interaction = make_interaction(client, OWNER)
+
+    await services.status.callback(services, interaction, "web", "all")
+
+    embed = interaction.followup.send.await_args.kwargs["embed"]
+    assert embed.color == embeds.Color.WARNING  # 有一個後端已停止
+    assert "運作中**（`active`）" in embed.fields[0].value
+    assert "已停止**（`exited`）" in embed.fields[1].value
+
+
+@pytest.mark.asyncio
+async def test_add_without_suffix_defaults_to_service(client, services):
+    interaction = make_interaction(client, OWNER)
+
+    await services.add.callback(services, interaction, "blog", "baihu-blog-api", None)
+
+    assert client.system_service.get("blog").targets == {Backend.SYSTEMD: "baihu-blog-api.service"}
+    assert "`baihu-blog-api.service`" in reply(interaction)
 
 
 def test_code_block_cannot_be_escaped():

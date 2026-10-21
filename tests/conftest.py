@@ -29,6 +29,19 @@ def make_interaction(client, user_id: int, role_ids=(), guild_id=GUILD_ID, **nam
     )
 
 
+def sent_text(mock) -> str:
+    """把最後一次送出的訊息（文字與 embed 的標題、描述、欄位）合併成文字，方便斷言。"""
+    call = mock.await_args
+    parts = list(call.args)
+    embed_list = call.kwargs.get("embeds") or ([call.kwargs["embed"]] if call.kwargs.get("embed") else [])
+
+    for embed in embed_list:
+        parts += [embed.title or "", embed.description or "", embed.author.name or "", embed.footer.text or ""]
+        parts += [f"{field.name}\n{field.value}" for field in embed.fields]
+
+    return "\n".join(str(part) for part in parts)
+
+
 @pytest.fixture
 def tmp_db(tmp_path):
     return SimpleNamespace(services=tmp_path / "service.json", permissions=tmp_path / "permissions.json")

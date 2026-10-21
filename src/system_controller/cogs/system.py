@@ -4,13 +4,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from system_controller.core.interactions import (
-    MAX_MESSAGE_LENGTH,
-    audit_log,
-    code_block,
-    service_autocomplete,
-    visible_services,
-)
+from system_controller.core import embeds
+from system_controller.core.interactions import audit_log, service_autocomplete, visible_services
 from system_controller.core.permissions import require
 from system_controller.models.permission import Permission
 from system_controller.models.service import Action, Backend, InvalidServiceError
@@ -34,10 +29,6 @@ SCOPE_CHOICES = [app_commands.Choice(name="全部", value="all"), *BACKEND_CHOIC
 
 def parse_scope(value: str) -> Backend | None:
     return None if value == "all" else Backend(value)
-
-
-def describe_targets(targets: dict[Backend, str]) -> str:
-    return "、".join(f"`{backend}`: `{target}`" for backend, target in targets.items())
 
 
 def service_options(level: Permission):
@@ -71,19 +62,13 @@ class Services(commands.GroupCog, group_name="service", group_description="管�
             results = await self.system_service.control(service, action, parse_scope(backend))
 
         except (ServiceNotFound, InvalidServiceError) as e:
-            await interaction.followup.send(f"❌ {e}")
+            await interaction.followup.send(embed=embeds.error(str(e)))
             return
-
-        lines = [f"**{service}** {ACTION_LABELS[action]}："]
 
         for result in results:
             audit_log(interaction, action, service, result.success, f"{result.backend}:{result.target} {result.message}")
-            lines.append(f"{'✅' if result.success else '❌'} `{result.backend}` `{result.target}`")
 
-            if not result.success:
-                lines.append(code_block(result.message, limit=500))
-
-        await interaction.followup.send("\n".join(lines))
+        await interaction.followup.send(embed=embeds.control_result(service, ACTION_LABELS[action], results))
 
     # --- 控制指令（操作者以上，可為單一服務授權） ---
 
@@ -128,14 +113,10 @@ class Services(commands.GroupCog, group_name="service", group_description="管�
             statuses = await self.system_service.status(service, parse_scope(backend))
 
         except (ServiceNotFound, InvalidServiceError) as e:
-            await interaction.followup.send(f"❌ {e}")
+            await interaction.followup.send(embed=embeds.error(str(e)))
             return
 
-        lines = [f"**{service}** 狀態："] + [
-            f"• `{s.backend}` `{s.target}` — Active: `{s.active}` / Enabled: `{s.enabled}`"
-            for s in statuses
-        ]
-        await interaction.followup.send("\n".join(lines))
+        await interaction.followup.send(embed=embeds.status(service, statuses))
 
     @app_commands.command(name="logs", description="查詢服務日誌（僅自己可見）")
     @service_options(Permission.VIEWER)
@@ -154,35 +135,37 @@ class Services(commands.GroupCog, group_name="service", group_description="管�
             logs = await self.system_service.logs(service, parse_scope(backend), lines)
 
         except (ServiceNotFound, InvalidServiceError) as e:
-            await interaction.followup.send(f"❌ {e}", ephemeral=True)
+            await interaction.followup.send(embed=embeds.error(str(e)), ephemeral=True)
             return
 
         audit_log(interaction, "logs", service, all(log.success for log in logs), f"backend={backend}")
-        content = "\n\n".join(f"===== {log.backend}: {log.target} =====\n{log.content}" for log in logs)
+        log_embeds, truncated = embeds.logs(service, logs, lines)
 
-        if len(content) <= MAX_MESSAGE_LENGTH - 50:
-            await interaction.followup.send(f"**{service}** 日誌：\n{code_block(content)}", ephemeral=True)
-        else:
-            log_file = discord.File(fp=io.BytesIO(content.encode("utf-8")), filename=f"{service}_logs.txt")
-            await interaction.followup.send(f"**{service}** 的日誌過長，已改以文字檔傳送：", file=log_file, ephemeral=True)
+        # 內容過長時，embed 只顯示最新的部分，並附上完整日誌檔
+        files = []
+
+        if truncated:
+            content = "\n\n".join(f"===== {log.backend}: {log.target} =====\n{log.message}" for log in logs)
+            files.append(discord.File(fp=io.BytesIO(content.encode("utf-8")), filename=f"{service}_logs.txt"))
+
+        await interaction.followup.send(embeds=log_embeds, files=files, ephemeral=True)
 
     @app_commands.command(name="list", description="列出你可以存取的服務")
     async def service_list(self, interaction: discord.Interaction):
         services = visible_services(interaction)
 
         if not services:
-            await interaction.response.send_message("沒有你可以存取的服務。", ephemeral=True)
+            await interaction.response.send_message(embed=embeds.error("沒有你可以存取的服務。", title="服務清單"), ephemeral=True)
             return
 
-        formatted = [f"- **{s.name}**：{describe_targets(s.targets)}" for s in services]
-        await interaction.response.send_message("**服務清單：**\n" + "\n".join(formatted))
+        await interaction.response.send_message(embed=embeds.service_list(services))
 
     # --- 管理指令（管理員） ---
 
     @app_commands.command(name="add", description="新增服務，可同時設定 systemd unit 與 Docker 容器")
     @app_commands.describe(
         name="服務名稱（英數、_、-，最多 32 字）",
-        unit="systemd unit 名稱，例如 nginx.service",
+        unit="systemd unit 名稱，例如 nginx（預設 .service，也可指定 .socket / .timer）",
         container="Docker 容器名稱",
     )
     @require(Permission.ADMIN)
@@ -193,18 +176,18 @@ class Services(commands.GroupCog, group_name="service", group_description="管�
             success = self.system_service.add(name, targets)
 
         except InvalidServiceError as e:
-            await interaction.response.send_message(f"❌ 新增失敗：{e}", ephemeral=True)
+            await interaction.response.send_message(embed=embeds.error(str(e), title="新增失敗"), ephemeral=True)
             return
 
         audit_log(interaction, "add", name, success, str(targets))
 
         if success:
-            await interaction.response.send_message(f"✅ 已新增服務 **{name}**：{describe_targets(self.system_service.get(name).targets)}")
+            await interaction.response.send_message(embed=embeds.service_detail("已新增服務", self.system_service.get(name)))
         else:
-            await interaction.response.send_message(f"❌ 新增失敗：服務 **{name}** 已存在。", ephemeral=True)
+            await interaction.response.send_message(embed=embeds.error(f"服務 **{name}** 已存在。", title="新增失敗"), ephemeral=True)
 
     @app_commands.command(name="set", description="為服務設定或更換 systemd unit / Docker 容器")
-    @app_commands.describe(service="服務名稱", backend="後端", target="systemd unit 名稱或 Docker 容器名稱")
+    @app_commands.describe(service="服務名稱", backend="後端", target="systemd unit 名稱（預設 .service）或 Docker 容器名稱")
     @app_commands.autocomplete(service=service_autocomplete)
     @app_commands.choices(backend=BACKEND_CHOICES)
     @require(Permission.ADMIN)
@@ -226,11 +209,11 @@ class Services(commands.GroupCog, group_name="service", group_description="管�
             updated = operation()
 
         except (ServiceNotFound, InvalidServiceError) as e:
-            await interaction.response.send_message(f"❌ {e}", ephemeral=True)
+            await interaction.response.send_message(embed=embeds.error(str(e)), ephemeral=True)
             return
 
         audit_log(interaction, action, service, True, detail)
-        await interaction.response.send_message(f"✅ 服務 **{service}** 已更新：{describe_targets(updated.targets)}")
+        await interaction.response.send_message(embed=embeds.service_detail("服務已更新", updated))
 
     @app_commands.command(name="remove", description="移除服務（連同其單獨授權）")
     @app_commands.describe(service="服務名稱")
@@ -242,9 +225,9 @@ class Services(commands.GroupCog, group_name="service", group_description="管�
 
         if success:
             self.bot.permissions.repository.remove_service(service)
-            await interaction.response.send_message(f"✅ 已移除服務 **{service}**")
+            await interaction.response.send_message(embed=embeds.success("已移除服務", f"服務 **{service}** 及其單獨授權已移除。"))
         else:
-            await interaction.response.send_message(f"❌ 找不到服務 **{service}**", ephemeral=True)
+            await interaction.response.send_message(embed=embeds.error(f"找不到服務 **{service}**"), ephemeral=True)
 
 
 async def setup(bot: commands.Bot):

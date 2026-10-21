@@ -6,6 +6,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from system_controller import cogs
+from system_controller.core import embeds
 from system_controller.core.config import Settings
 from system_controller.core.permissions import PermissionPolicy
 from system_controller.repositories.permission_repository import PermissionRepository
@@ -81,7 +82,9 @@ class Bot(commands.Bot):
             logger.error("指令執行錯誤", exc_info=error)
             message = "執行指令時發生內部錯誤，請聯絡管理員查看日誌。"
 
+        embed = embeds.error(message, title="無法執行指令")
+
         if interaction.response.is_done():
-            await interaction.followup.send(message, ephemeral=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
         else:
-            await interaction.response.send_message(message, ephemeral=True)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
