@@ -2,8 +2,8 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from system_controller.adapters.systemd import CommandResult
-from system_controller.models.service import Service
+from system_controller.adapters.base import BackendState, CommandResult
+from system_controller.models.service import Backend, InvalidServiceError, Service
 from system_controller.services.system_service import (
     ServiceLogs,
     ServiceOperationResult,
@@ -26,15 +26,21 @@ def systemd():
 def service():
     return Service(
         name="test",
-        unit="system-controller-test.service",
+        target="system-controller-test.service",
     )
 
 
 @pytest.fixture
-def system_service(repository, systemd):
+def docker():
+    return Mock()
+
+
+@pytest.fixture
+def system_service(repository, systemd, docker):
     return SystemService(
         repository=repository,
         systemd=systemd,
+        docker=docker,
     )
 
 
@@ -95,7 +101,7 @@ def test_get_all_returns_registered_services(
         service,
         Service(
             name="another",
-            unit="another.service",
+            target="another.service",
         ),
     ]
 
@@ -204,7 +210,7 @@ async def test_stop_success(
     assert result.message == "Service stopped successfully."
 
     systemd.stop.assert_awaited_once_with(
-        service.unit
+        service.target
     )
 
 
@@ -232,7 +238,7 @@ async def test_restart_success(
     assert result.message == "Service restarted successfully."
 
     systemd.restart.assert_awaited_once_with(
-        service.unit
+        service.target
     )
 
 
@@ -260,7 +266,7 @@ async def test_enable_success(
     assert result.message == "Service enabled successfully."
 
     systemd.enable.assert_awaited_once_with(
-        service.unit
+        service.target
     )
 
 
@@ -288,7 +294,7 @@ async def test_disable_success(
     assert result.message == "Service disabled successfully."
 
     systemd.disable.assert_awaited_once_with(
-        service.unit
+        service.target
     )
 
 
@@ -306,16 +312,8 @@ async def test_status_success(
 ):
     repository.get.return_value = service
 
-    systemd.is_active = AsyncMock(
-        return_value=command_result(
-            stdout="active\n"
-        )
-    )
-
-    systemd.is_enabled = AsyncMock(
-        return_value=command_result(
-            stdout="enabled\n"
-        )
+    systemd.state = AsyncMock(
+        return_value=BackendState(active="active", enabled="enabled")
     )
 
     result = await system_service.status("test")
@@ -325,12 +323,8 @@ async def test_status_success(
     assert result.active == "active"
     assert result.enabled == "enabled"
 
-    systemd.is_active.assert_awaited_once_with(
-        service.unit
-    )
-
-    systemd.is_enabled.assert_awaited_once_with(
-        service.unit
+    systemd.state.assert_awaited_once_with(
+        service.target
     )
 
 
@@ -346,8 +340,7 @@ async def test_status_unknown_service(
 
     assert result is None
 
-    systemd.is_active.assert_not_called()
-    systemd.is_enabled.assert_not_called()
+    systemd.state.assert_not_called()
 
 
 # ----------------------------------------------------------------------
@@ -377,7 +370,7 @@ async def test_logs_success(
     assert result.content == "line 1\nline 2\nline 3"
 
     systemd.logs.assert_awaited_once_with(
-        service.unit,
+        service.target,
         50,
     )
 
@@ -402,6 +395,7 @@ async def test_logs_failure(
 
     assert isinstance(result, ServiceLogs)
     assert result.service is service
+    assert result.success is False
     assert result.content == "journalctl failed"
 
 
@@ -433,7 +427,7 @@ def test_add_service(
 
     result = system_service.add(
         name="test",
-        unit="system-controller-test.service",
+        target="system-controller-test.service",
     )
 
     assert result is True
@@ -444,7 +438,45 @@ def test_add_service(
 
     assert isinstance(added_service, Service)
     assert added_service.name == "test"
-    assert added_service.unit == "system-controller-test.service"
+    assert added_service.target == "system-controller-test.service"
+    assert added_service.backend is Backend.SYSTEMD
+
+
+def test_add_docker_service(
+    system_service,
+    repository,
+):
+    repository.add.return_value = True
+
+    assert system_service.add("web", "my-web", "docker") is True
+
+    added_service = repository.add.call_args.args[0]
+
+    assert added_service.backend is Backend.DOCKER
+    assert added_service.target == "my-web"
+
+
+@pytest.mark.parametrize(
+    ("name", "target", "backend"),
+    [
+        ("bad name", "ok.service", "systemd"),
+        ("ok", "--help", "systemd"),
+        ("ok", "nginx", "systemd"),
+        ("ok", "-rm", "docker"),
+        ("ok", "web", "kubernetes"),
+    ],
+)
+def test_add_rejects_invalid_input(
+    system_service,
+    repository,
+    name,
+    target,
+    backend,
+):
+    with pytest.raises(InvalidServiceError):
+        system_service.add(name, target, backend)
+
+    repository.add.assert_not_called()
 
 
 # ----------------------------------------------------------------------
@@ -463,3 +495,33 @@ def test_remove_service(
     assert result is True
 
     repository.remove.assert_called_once_with("test")
+
+
+# ----------------------------------------------------------------------
+# docker backend dispatch
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_operations_dispatch_to_docker_backend(
+    system_service,
+    repository,
+    systemd,
+    docker,
+):
+    container = Service(name="web", target="my-web", backend=Backend.DOCKER)
+    repository.get.return_value = container
+
+    docker.restart = AsyncMock(return_value=command_result())
+    docker.state = AsyncMock(
+        return_value=BackendState(active="running", enabled="enabled (unless-stopped)")
+    )
+
+    result = await system_service.restart("web")
+    status = await system_service.status("web")
+
+    assert result.success is True
+    assert status.active == "running"
+
+    docker.restart.assert_awaited_once_with("my-web")
+    systemd.restart.assert_not_called()

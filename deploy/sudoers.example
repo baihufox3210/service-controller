@@ -1,0 +1,23 @@
+# /etc/sudoers.d/service-controller
+# 使用 `sudo visudo -f /etc/sudoers.d/service-controller` 編輯，並將 svcbot 換成執行機器人的帳號。
+# 只開放「明確列出」的服務與容器，不要對服務 / 容器名稱使用萬用字元 *，否則等同開放整台主機。
+# 注意：sudoers 參數中的 = , : \ 必須以反斜線跳脫。
+# systemctl is-active / is-enabled 與 journalctl 不經過 sudo；讀取 journal 需將帳號加入 systemd-journal 群組。
+
+Cmnd_Alias SC_SYSTEMD = \
+    /usr/bin/systemctl start -- nginx.service, \
+    /usr/bin/systemctl stop -- nginx.service, \
+    /usr/bin/systemctl restart -- nginx.service, \
+    /usr/bin/systemctl enable -- nginx.service, \
+    /usr/bin/systemctl disable -- nginx.service
+
+Cmnd_Alias SC_DOCKER = \
+    /usr/bin/docker start -- my-web, \
+    /usr/bin/docker stop -- my-web, \
+    /usr/bin/docker restart -- my-web, \
+    /usr/bin/docker update --restart\=unless-stopped -- my-web, \
+    /usr/bin/docker update --restart\=no -- my-web, \
+    /usr/bin/docker inspect --type\=container --format\={{.State.Status}} {{.HostConfig.RestartPolicy.Name}} -- my-web, \
+    /usr/bin/docker logs --tail\=* --timestamps -- my-web
+
+svcbot ALL=(root) NOPASSWD: SC_SYSTEMD, SC_DOCKER

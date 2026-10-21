@@ -1,52 +1,31 @@
-import asyncio
-from dataclasses import dataclass
+from system_controller.adapters.base import BackendState, CommandAdapter, CommandResult, clamp_lines
+from system_controller.models.service import Backend
 
-@dataclass(slots=True)
-class CommandResult:
-    code: int
-    stdout: str
-    stderr: str
-    
-    @property
-    def success(self) -> bool:
-        return self.code == 0
-    
-class SystemdAdapter:
-    def __init__(self, sudo_path: str = "/usr/bin/sudo", systemctl_path: str = "/usr/bin/systemctl"):
+
+class SystemdAdapter(CommandAdapter):
+    backend = Backend.SYSTEMD
+
+    def __init__(
+        self,
+        sudo_path: str = "/usr/bin/sudo",
+        systemctl_path: str = "/usr/bin/systemctl",
+        journalctl_path: str = "/usr/bin/journalctl",
+    ):
         self.sudo_path = sudo_path
         self.systemctl_path = systemctl_path
-        
-    async def _run(self, *args: str, timeout: float = 15) -> CommandResult:
-        try:
-            process = await asyncio.create_subprocess_exec(
-                *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-            )
-            
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(), timeout=timeout
-            )
-            
-            return CommandResult(
-                code=process.returncode or 0,
-                stdout=stdout.decode(errors="replace"),
-                stderr=stderr.decode(errors="replace")
-            )
-        
-        except asyncio.TimeoutError:
-            return CommandResult(
-                code=-1, stdout="", stderr="Command timed out."
-            )
-        
-        except OSError as e:
-            return CommandResult(
-                code=-1, stdout="", stderr=str(e)
-            )
-            
-    async def _systemctl(self, action: str, unit: str, *, timeout: float = 15) -> CommandResult:
-        return await self._run(
-            self.sudo_path, "-n", self.systemctl_path, action, unit, timeout=timeout
-        )
-    
+        self.journalctl_path = journalctl_path
+
+    async def _systemctl(self, action: str, unit: str, *, privileged: bool = True, timeout: float = 15) -> CommandResult:
+        if error := self._invalid_target(unit): return error
+
+        # "--" 確保 unit 一定被解讀為參數而非選項
+        command = (self.systemctl_path, action, "--", unit)
+
+        if privileged:
+            command = (self.sudo_path, "-n", *command)
+
+        return await self._run(*command, timeout=timeout)
+
     async def start(self, unit: str) -> CommandResult:
         return await self._systemctl("start", unit)
 
@@ -62,13 +41,26 @@ class SystemdAdapter:
     async def disable(self, unit: str) -> CommandResult:
         return await self._systemctl("disable", unit)
 
+    # 查詢類指令不需要 root 權限，不經過 sudo 以縮小權限範圍
     async def is_active(self, unit: str) -> CommandResult:
-        return await self._systemctl("is-active", unit)
+        return await self._systemctl("is-active", unit, privileged=False)
 
     async def is_enabled(self, unit: str) -> CommandResult:
-        return await self._systemctl("is-enabled", unit)
-    
+        return await self._systemctl("is-enabled", unit, privileged=False)
+
+    async def state(self, unit: str) -> BackendState:
+        active = await self.is_active(unit)
+        enabled = await self.is_enabled(unit)
+
+        return BackendState(
+            active=active.stdout.strip() or "unknown",
+            enabled=enabled.stdout.strip() or "unknown",
+        )
+
     async def logs(self, unit: str, lines: int = 50) -> CommandResult:
+        if error := self._invalid_target(unit): return error
+
         return await self._run(
-            "journalctl", "-u", unit, "-n", str(lines), "--no-pager",timeout=10
+            self.journalctl_path, f"--unit={unit}", "-n", str(clamp_lines(lines)), "--no-pager", "-o", "short-iso",
+            timeout=10
         )
