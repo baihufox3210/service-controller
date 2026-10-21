@@ -106,8 +106,6 @@ sudo systemctl enable --now service-controller
 }
 ```
 
-舊版格式 `{"nginx": "nginx.service"}` 仍可讀取，會視為只有 systemd 的服務。
-
 `database/permissions.json`（`PERMISSIONS_FILE`，由 `/access` 指令維護）：
 
 ```json

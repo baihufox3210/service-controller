@@ -26,9 +26,10 @@ def test_service_roundtrip(tmp_db):
     assert [p.name for p in tmp_db.services.parent.iterdir()] == ["service.json"]  # 沒有殘留暫存檔
 
 
-def test_service_loads_legacy_format_and_skips_invalid(tmp_db):
+def test_service_skips_invalid_entries(tmp_db):
     tmp_db.services.write_text(json.dumps({
-        "nginx": "nginx.service",
+        "nginx": {"systemd": "nginx.service"},
+        "string": "nginx.service",
         "web": {"systemd": "web.service", "docker": "web"},
         "evil": "--help",
         "empty": {},

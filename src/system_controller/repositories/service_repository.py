@@ -1,7 +1,7 @@
 import logging
 from pathlib import Path
 
-from system_controller.models.service import Backend, InvalidServiceError, Service
+from system_controller.models.service import InvalidServiceError, Service
 from system_controller.repositories.json_file import read_json, write_json_atomic
 
 logger = logging.getLogger(__name__)
@@ -22,11 +22,8 @@ class ServiceRepository:
         if not isinstance(data, dict): return
 
         for name, entry in data.items():
-            # 舊格式 {"name": "unit.service"} 視為 systemd 服務
-            targets = {Backend.SYSTEMD: entry} if isinstance(entry, str) else entry
-
             try:
-                self.services[name] = Service(name=name, targets=dict(targets))
+                self.services[name] = Service(name=name, targets=dict(entry))
 
             except (InvalidServiceError, TypeError, ValueError):
                 logger.warning("略過無效的服務設定：%r -> %r", name, entry)

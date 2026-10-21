@@ -10,10 +10,6 @@ def test_requires_token():
         load_settings({})
 
 
-def test_accepts_legacy_token_key():
-    assert load_settings({"bot_token": "abc"}).token == "abc"
-
-
 def test_parses_options():
     settings = load_settings({
         "BOT_TOKEN": "abc",

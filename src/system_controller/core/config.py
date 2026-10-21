@@ -55,7 +55,7 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         load_dotenv()
         env = dict(os.environ)
 
-    token = env.get("BOT_TOKEN") or env.get("bot_token")
+    token = env.get("BOT_TOKEN")
 
     if not token:
         raise ConfigError("未設定 BOT_TOKEN，請在 .env 或環境變數中提供 Discord Bot Token。")
