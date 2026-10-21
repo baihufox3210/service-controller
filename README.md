@@ -51,26 +51,49 @@
 - 控制類指令有冷卻時間（每人每 5 秒 1 次）。
 - 所有操作、授權變更與權限拒絕都會寫入 `system_controller.audit` 日誌。
 
-## 安全設計
+## 部署（Docker）
 
-- 服務名稱與 target 皆以白名單正規表示式驗證，不允許以 `-` 開頭，並在指令中加上 `--`，防止參數注入。
-- 只能操作透過 `/service add` 註冊過的服務；一般使用者無法直接指定任意 unit 或容器。
-- 子程序以參數陣列執行（不經過 shell），逾時會被強制終止。
-- 需要 root 的操作透過 `sudo -n` 執行，搭配 `deploy/sudoers.example` 只開放指定的指令；查詢類 systemctl 指令不經過 sudo。
-- 機器人不會發出任何 @mention，輸出內容會跳脫程式碼區塊，日誌回覆僅呼叫者可見。
-- 資料檔以原子寫入（暫存檔 + rename）儲存，檔案權限 `600`。
-- 不需要任何 privileged gateway intent。
+機器人本身跑在容器裡，透過掛載進來的 socket 操作**主機**的 Docker 與 systemd：
 
-> ⚠️ 將帳號加入 `docker` 群組等同給予 root 權限。建議保留 `DOCKER_USE_SUDO=true`，並用 sudoers 限制只能操作指定容器。
+| 用途 | 掛載 | 權限來源 |
+| --- | --- | --- |
+| Docker 後端 | `/var/run/docker.sock` | 主機 `docker` 群組（`DOCKER_GID`） |
+| systemd 控制 / 狀態 | `/run/dbus/system_bus_socket`、`/run/systemd/system` | 主機的 polkit 規則 |
+| systemd 日誌 | `/var/log/journal`、`/etc/machine-id`（唯讀） | 主機 `systemd-journal` 群組（`JOURNAL_GID`） |
+| 服務與權限資料 | named volume `data` → `/app/database` | — |
 
-## 安裝與執行
-
-需求：Python 3.13+、[uv](https://docs.astral.sh/uv/)。
+### 1. 設定 `.env`
 
 ```bash
-uv sync
-cp .env.example .env    # 填入 BOT_TOKEN（以及建議填 OWNER_USER_IDS、ALLOWED_GUILD_IDS）
-uv run system-controller
+cp .env.example .env
+```
+
+填入 `BOT_TOKEN`、建議填 `OWNER_USER_IDS` 與 `ALLOWED_GUILD_IDS`，以及主機的群組 ID：
+
+```bash
+getent group docker | cut -d: -f3           # → DOCKER_GID
+getent group systemd-journal | cut -d: -f3  # → JOURNAL_GID
+```
+
+### 2. 設定 systemd 權限（只用 Docker 後端可略過）
+
+容器以 UID `10001` 執行。在主機建立同 UID 的使用者，並安裝 polkit 規則，只開放指定 unit 的 start / stop / restart：
+
+```bash
+sudo useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin svcbot
+sudo cp deploy/polkit/50-service-controller.rules /etc/polkit-1/rules.d/
+sudo nano /etc/polkit-1/rules.d/50-service-controller.rules   # 編輯 ALLOWED_UNITS
+```
+
+- 規則檔需要使用 JavaScript 規則的 polkit（polkit 0.106 以上，Debian 12+、Ubuntu 23.04+ 等）。
+- systemd 的 `enable` / `disable` 需要 `manage-unit-files` 權限。polkit 無法把它限制到單一 unit，開放等同 root，因此預設不開放（規則檔內有註解說明）。
+- 日誌需要主機啟用持久化 journal（`/var/log/journal` 存在）。
+
+### 3. 啟動
+
+```bash
+docker compose up -d --build
+docker compose logs -f
 ```
 
 啟動後由擁有者在 Discord 中設定權限，例如：
@@ -81,23 +104,28 @@ uv run system-controller
 /service add name:web unit:web.service container:web
 ```
 
-### 部署建議
-
-1. 建立專用帳號：`sudo useradd --system --create-home svcbot`
-2. 將專案放在 `/opt/service-controller`，執行 `uv sync --no-dev`
-3. 依 `deploy/sudoers.example` 建立 `/etc/sudoers.d/service-controller`（`sudo visudo -f ...`），只列出要開放的服務與容器
-4. 若要讀取 systemd 日誌：`sudo usermod -aG systemd-journal svcbot`
-5. 安裝 `deploy/service-controller.service` 為 systemd 服務：
+資料存在 named volume `data`，更新映像檔不會遺失；備份可用：
 
 ```bash
-sudo cp deploy/service-controller.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now service-controller
+docker compose cp service-controller:/app/database ./backup
 ```
+
+## 安全設計
+
+- 服務名稱與 target 皆以白名單正規表示式驗證，不允許以 `-` 開頭，並在指令中加上 `--`，防止參數注入。
+- 只能操作透過 `/service add` 註冊過的服務；一般使用者無法直接指定任意 unit 或容器。
+- 子程序以參數陣列執行（不經過 shell），逾時會被強制終止。
+- 容器以非 root（UID 10001）執行，根目錄唯讀、移除所有 capabilities、啟用 `no-new-privileges`，並限制記憶體與行程數。
+- systemd 操作的權限由主機 polkit 以 unit 白名單控制。
+- 機器人不會發出任何 @mention，輸出內容會跳脫程式碼區塊，日誌回覆僅呼叫者可見。
+- 資料檔以原子寫入（暫存檔 + rename）儲存，檔案權限 `600`。
+- 不需要任何 privileged gateway intent。
+
+> ⚠️ **Docker socket 等同主機 root 權限**：能存取它就能建立特權容器。機器人只會執行白名單內的指令，但如果容器本身被攻破，主機也會受影響。請妥善保護 `BOT_TOKEN`，並以 `ALLOWED_GUILD_IDS` 與權限設定縮小可操作的範圍。只需要 systemd 後端時，可以從 `compose.yaml` 移除 docker.sock 掛載與 `DOCKER_GID`。
 
 ## 資料格式
 
-`database/service.json`（`SERVICES_FILE`）：
+`/app/database/service.json`：
 
 ```json
 {
@@ -106,7 +134,7 @@ sudo systemctl enable --now service-controller
 }
 ```
 
-`database/permissions.json`（`PERMISSIONS_FILE`，由 `/access` 指令維護）：
+`/app/database/permissions.json`（由 `/access` 指令維護）：
 
 ```json
 {
@@ -122,6 +150,7 @@ sudo systemctl enable --now service-controller
 ## 開發
 
 ```bash
+uv sync
 uv run pytest
 ```
 

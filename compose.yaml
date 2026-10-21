@@ -1,0 +1,43 @@
+services:
+  service-controller:
+    build: .
+    image: service-controller:latest
+    container_name: service-controller
+    restart: unless-stopped
+    env_file: .env
+
+    # 映像檔以非 root 的 UID 10001 執行，透過主機群組取得 Docker socket 與 journal 的存取權
+    group_add:
+      - "${DOCKER_GID:?請在 .env 設定 DOCKER_GID（getent group docker | cut -d: -f3）}"
+      - "${JOURNAL_GID:?請在 .env 設定 JOURNAL_GID（getent group systemd-journal | cut -d: -f3）}"
+
+    volumes:
+      - data:/app/database
+      # Docker 後端：操作主機的容器
+      - /var/run/docker.sock:/var/run/docker.sock
+      # systemd 後端：透過 D-Bus 操作主機的 systemd，權限由主機的 polkit 規則控制
+      - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket
+      - /run/systemd/system:/run/systemd/system:ro
+      # systemd 日誌：唯讀讀取主機的 journal
+      - /var/log/journal:/var/log/journal:ro
+      - /etc/machine-id:/etc/machine-id:ro
+
+    # 容器強化
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 256m
+
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  data:

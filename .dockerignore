@@ -1,0 +1,8 @@
+.git
+.venv
+.env
+database
+tests
+deploy
+**/__pycache__
+**/*.py[oc]

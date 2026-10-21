@@ -3,37 +3,27 @@ from system_controller.models.service import Action, Backend
 
 
 class SystemdAdapter(CommandAdapter):
+    """透過掛載進容器的 D-Bus socket 操作主機的 systemd；權限由主機的 polkit 規則決定。"""
+
     backend = Backend.SYSTEMD
 
-    def __init__(
-        self,
-        sudo_path: str = "/usr/bin/sudo",
-        systemctl_path: str = "/usr/bin/systemctl",
-        journalctl_path: str = "/usr/bin/journalctl",
-    ):
-        self.sudo_path = sudo_path
+    def __init__(self, systemctl_path: str = "/usr/bin/systemctl", journalctl_path: str = "/usr/bin/journalctl"):
         self.systemctl_path = systemctl_path
         self.journalctl_path = journalctl_path
 
-    async def _systemctl(self, verb: str, unit: str, *, privileged: bool) -> CommandResult:
+    async def _systemctl(self, verb: str, unit: str) -> CommandResult:
         if error := self._invalid_target(unit): return error
 
-        # "--" 確保 unit 一定被解讀為參數而非選項
-        command = (self.systemctl_path, verb, "--", unit)
-
-        if privileged:
-            command = (self.sudo_path, "-n", *command)
-
-        return await self._run(*command)
+        # "--" 確保 unit 一定被解讀為參數而非選項；--no-ask-password 避免等待互動式驗證
+        return await self._run(self.systemctl_path, "--no-ask-password", verb, "--", unit)
 
     async def control(self, action: Action, unit: str) -> CommandResult:
         # Action 的值與 systemctl 子指令相同
-        return await self._systemctl(Action(action).value, unit, privileged=True)
+        return await self._systemctl(Action(action).value, unit)
 
     async def state(self, unit: str) -> BackendState:
-        # 查詢類指令不需要 root 權限，不經過 sudo 以縮小權限範圍
-        active = await self._systemctl("is-active", unit, privileged=False)
-        enabled = await self._systemctl("is-enabled", unit, privileged=False)
+        active = await self._systemctl("is-active", unit)
+        enabled = await self._systemctl("is-enabled", unit)
 
         return BackendState(
             active=active.stdout.strip() or "unknown",

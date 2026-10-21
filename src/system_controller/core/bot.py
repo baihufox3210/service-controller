@@ -6,11 +6,8 @@ from discord import app_commands
 from discord.ext import commands
 
 from system_controller import cogs
-from system_controller.adapters.docker import DockerAdapter
-from system_controller.adapters.systemd import SystemdAdapter
 from system_controller.core.config import Settings
 from system_controller.core.permissions import PermissionPolicy
-from system_controller.models.service import Backend
 from system_controller.repositories.permission_repository import PermissionRepository
 from system_controller.repositories.service_repository import ServiceRepository
 from system_controller.services.system_service import SystemService
@@ -34,21 +31,7 @@ class Bot(commands.Bot):
             owner_ids=settings.owner_user_ids,
             allowed_guild_ids=settings.allowed_guild_ids,
         )
-        self.system_service = SystemService(
-            repository=ServiceRepository(settings.services_file),
-            backends={
-                Backend.SYSTEMD: SystemdAdapter(
-                    sudo_path=settings.sudo_path,
-                    systemctl_path=settings.systemctl_path,
-                    journalctl_path=settings.journalctl_path,
-                ),
-                Backend.DOCKER: DockerAdapter(
-                    docker_path=settings.docker_path,
-                    sudo_path=settings.sudo_path,
-                    use_sudo=settings.docker_use_sudo,
-                ),
-            },
-        )
+        self.system_service = SystemService(ServiceRepository(settings.services_file))
 
         self.tree.error(self.on_app_command_error)
 

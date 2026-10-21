@@ -15,28 +15,18 @@ ACTION_ARGS: dict[Action, tuple[str, ...]] = {
 
 
 class DockerAdapter(CommandAdapter):
+    """透過掛載進容器的 /var/run/docker.sock 操作主機的 Docker。"""
+
     backend = Backend.DOCKER
 
-    def __init__(
-        self,
-        docker_path: str = "/usr/bin/docker",
-        sudo_path: str = "/usr/bin/sudo",
-        use_sudo: bool = True,
-    ):
+    def __init__(self, docker_path: str = "/usr/bin/docker"):
         self.docker_path = docker_path
-        self.sudo_path = sudo_path
-        self.use_sudo = use_sudo
 
     async def _docker(self, *args: str, container: str, timeout: float = 30, merge_stderr: bool = False) -> CommandResult:
         if error := self._invalid_target(container): return error
 
         # "--" 確保容器名稱一定被解讀為參數而非選項
-        command = (self.docker_path, *args, "--", container)
-
-        if self.use_sudo:
-            command = (self.sudo_path, "-n", *command)
-
-        return await self._run(*command, timeout=timeout, merge_stderr=merge_stderr)
+        return await self._run(self.docker_path, *args, "--", container, timeout=timeout, merge_stderr=merge_stderr)
 
     async def control(self, action: Action, container: str) -> CommandResult:
         return await self._docker(*ACTION_ARGS[Action(action)], container=container)

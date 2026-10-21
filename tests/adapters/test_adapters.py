@@ -25,22 +25,22 @@ def docker():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("action", list(Action))
-async def test_systemd_control_uses_sudo_and_separator(systemd, action):
+async def test_systemd_control_uses_separator(systemd, action):
     await systemd.control(action, "nginx.service")
 
     assert systemd._run.await_args.args == (
-        "/usr/bin/sudo", "-n", "/usr/bin/systemctl", action.value, "--", "nginx.service",
+        "/usr/bin/systemctl", "--no-ask-password", action.value, "--", "nginx.service",
     )
 
 
 @pytest.mark.asyncio
-async def test_systemd_state_does_not_use_sudo(systemd):
+async def test_systemd_state(systemd):
     systemd._run = AsyncMock(side_effect=[ok("active\n"), ok("enabled\n")])
 
     state = await systemd.state("nginx.service")
 
     assert (state.active, state.enabled) == ("active", "enabled")
-    assert [call.args[0] for call in systemd._run.await_args_list] == ["/usr/bin/systemctl"] * 2
+    assert [call.args[2] for call in systemd._run.await_args_list] == ["is-active", "is-enabled"]
 
 
 @pytest.mark.asyncio
@@ -66,17 +66,7 @@ async def test_systemd_logs_clamps_lines(systemd):
 async def test_docker_control(docker, action, args):
     await docker.control(action, "my-web")
 
-    assert docker._run.await_args.args == ("/usr/bin/sudo", "-n", "/usr/bin/docker", *args, "--", "my-web")
-
-
-@pytest.mark.asyncio
-async def test_docker_without_sudo():
-    adapter = DockerAdapter(use_sudo=False)
-    adapter._run = AsyncMock(return_value=ok())
-
-    await adapter.control(Action.STOP, "db")
-
-    assert adapter._run.await_args.args == ("/usr/bin/docker", "stop", "--", "db")
+    assert docker._run.await_args.args == ("/usr/bin/docker", *args, "--", "my-web")
 
 
 @pytest.mark.asyncio
@@ -100,7 +90,7 @@ async def test_docker_state(docker, result, active, enabled):
 async def test_docker_logs_merges_stderr(docker):
     await docker.logs("my-web", lines=20)
 
-    assert docker._run.await_args.args[3:] == ("logs", "--tail=20", "--timestamps", "--", "my-web")
+    assert docker._run.await_args.args[1:] == ("logs", "--tail=20", "--timestamps", "--", "my-web")
     assert docker._run.await_args.kwargs["merge_stderr"] is True
 
 

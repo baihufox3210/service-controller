@@ -1,0 +1,32 @@
+// /etc/polkit-1/rules.d/50-service-controller.rules
+// 允許容器內的 svcbot（UID 10001）透過 D-Bus 操作「明確列出」的 systemd unit。
+// 主機上需要有同 UID 的使用者：
+//   sudo useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin svcbot
+
+var BOT_USER = "svcbot";
+
+// 允許 start / stop / restart 的 unit
+var ALLOWED_UNITS = [
+    "nginx.service",
+];
+
+polkit.addRule(function (action, subject) {
+    if (subject.user !== BOT_USER) return polkit.Result.NOT_HANDLED;
+
+    if (action.id === "org.freedesktop.systemd1.manage-units") {
+        var unit = action.lookup("unit");
+        var verb = action.lookup("verb");
+
+        if (ALLOWED_UNITS.indexOf(unit) >= 0 && ["start", "stop", "restart"].indexOf(verb) >= 0) {
+            return polkit.Result.YES;
+        }
+    }
+
+    // enable / disable 需要 manage-unit-files，但 polkit 無法限制到單一 unit，
+    // 開放後可啟用主機上任意 unit 檔，等同 root 權限。確定接受風險才取消註解。
+    // if (action.id === "org.freedesktop.systemd1.manage-unit-files") {
+    //     return polkit.Result.YES;
+    // }
+
+    return polkit.Result.NOT_HANDLED;
+});
