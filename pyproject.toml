@@ -1,13 +1,16 @@
 [project]
 name = "system-controller"
 version = "0.1.0"
-description = "Add your description here"
+description = "Discord bot for controlling systemd services and Docker containers with role-based access control"
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "discord-py>=2.4",
+    "python-dotenv>=1.0",
+]
 
 [project.scripts]
-system-controller = "system_controller:main"
+system-controller = "system_controller.main:main"
 
 [build-system]
 requires = ["uv_build>=0.12.3,<0.13.0"]
@@ -18,3 +21,7 @@ dev = [
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
 ]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

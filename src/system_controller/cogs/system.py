@@ -1,174 +1,251 @@
 import io
+
 import discord
 from discord import app_commands
 from discord.ext import commands
 
-from system_controller.services.system_service import SystemService
+from system_controller.core.interactions import (
+    MAX_MESSAGE_LENGTH,
+    audit_log,
+    code_block,
+    service_autocomplete,
+    visible_services,
+)
+from system_controller.core.permissions import require
+from system_controller.models.permission import Permission
+from system_controller.models.service import Action, Backend, InvalidServiceError
+from system_controller.services.system_service import ServiceNotFound, SystemService
+
+ACTION_LABELS = {
+    Action.START: "啟動",
+    Action.STOP: "關閉",
+    Action.RESTART: "重啟",
+    Action.ENABLE: "設定開機自動啟動",
+    Action.DISABLE: "取消開機自動啟動",
+}
+
+BACKEND_CHOICES = [
+    app_commands.Choice(name="systemd", value=Backend.SYSTEMD.value),
+    app_commands.Choice(name="Docker", value=Backend.DOCKER.value),
+]
+
+SCOPE_CHOICES = [app_commands.Choice(name="全部", value="all"), *BACKEND_CHOICES]
 
 
-class Services(commands.GroupCog, group_name="service"):
-    def __init__(self, bot: commands.Bot, system_service: SystemService = None):
+def parse_scope(value: str) -> Backend | None:
+    return None if value == "all" else Backend(value)
+
+
+def describe_targets(targets: dict[Backend, str]) -> str:
+    return "、".join(f"`{backend}`: `{target}`" for backend, target in targets.items())
+
+
+def service_options(level: Permission):
+    """服務相關指令共用的參數說明、自動完成、選項與單一服務權限檢查。"""
+    def decorator(func):
+        func = require(level, per_service=True)(func)
+        func = app_commands.autocomplete(service=service_autocomplete)(func)
+        func = app_commands.choices(backend=SCOPE_CHOICES)(func)
+        func = app_commands.describe(service="服務名稱", backend="要操作的後端（預設：全部）")(func)
+
+        return func
+
+    return decorator
+
+
+# 控制類指令的冷卻時間：每位使用者每 5 秒 1 次
+control_cooldown = app_commands.checks.cooldown(1, 5.0, key=lambda i: i.user.id)
+
+
+@app_commands.guild_only()
+class Services(commands.GroupCog, group_name="service", group_description="管理服務（systemd / Docker）"):
+    def __init__(self, bot: commands.Bot, system_service: SystemService):
         self.bot = bot
-        self.system_service = system_service or SystemService()
+        self.system_service = system_service
         super().__init__()
 
-    async def service_autocomplete(self, interaction: discord.Interaction, current: str):
-        services = (
-            self.system_service.get_all()
-            if hasattr(self.system_service, "get_all") else []
-        )
-        
-        choices = []
+    async def _control(self, interaction: discord.Interaction, service: str, action: Action, backend: str) -> None:
+        await interaction.response.defer()
 
-        for service in services:
-            name = getattr(service, "name", None) or service.get("name")
-            unit = getattr(service, "unit", "") or service.get("unit", "")
+        try:
+            results = await self.system_service.control(service, action, parse_scope(backend))
 
-            if current.lower() in name.lower() or current.lower() in unit.lower():
-                choices.append(app_commands.Choice(name=f"{name} ({unit})", value=name))
+        except (ServiceNotFound, InvalidServiceError) as e:
+            await interaction.followup.send(f"❌ {e}")
+            return
 
-        return choices[:25]
+        lines = [f"**{service}** {ACTION_LABELS[action]}："]
 
-    # --- 服務狀態控制指令 ---
+        for result in results:
+            audit_log(interaction, action, service, result.success, f"{result.backend}:{result.target} {result.message}")
+            lines.append(f"{'✅' if result.success else '❌'} `{result.backend}` `{result.target}`")
 
-    @app_commands.command(name="start", description="啟動系統服務")
-    @app_commands.describe(service="要啟動的服務名稱")
-    @app_commands.autocomplete(service=service_autocomplete)
-    async def start(self, interaction: discord.Interaction, service: str):
-        await interaction.response.defer(ephemeral=False)
-        result = await self.system_service.start(service)
+            if not result.success:
+                lines.append(code_block(result.message, limit=500))
 
-        if result.success:
-            await interaction.followup.send(f"`{service}` 啟動成功！\n```\n{result.message}\n```")
-        else:
-            await interaction.followup.send(f"`{service}` 啟動失敗：\n```\n{result.message}\n```")
+        await interaction.followup.send("\n".join(lines))
 
-    @app_commands.command(name="stop", description="關閉系統服務")
-    @app_commands.describe(service="要關閉的服務名稱")
-    @app_commands.autocomplete(service=service_autocomplete)
-    async def stop(self, interaction: discord.Interaction, service: str):
-        await interaction.response.defer(ephemeral=False)
-        result = await self.system_service.stop(service)
+    # --- 控制指令（操作者以上，可為單一服務授權） ---
 
-        if result.success:
-            await interaction.followup.send(f"`{service}` 關閉成功！\n```\n{result.message}\n```")
-        else:
-            await interaction.followup.send(f"`{service}` 關閉失敗：\n```\n{result.message}\n```")
+    @app_commands.command(name="start", description="啟動服務")
+    @service_options(Permission.OPERATOR)
+    @control_cooldown
+    async def start(self, interaction: discord.Interaction, service: str, backend: str = "all"):
+        await self._control(interaction, service, Action.START, backend)
 
-    @app_commands.command(name="restart", description="重啟系統服務")
-    @app_commands.describe(service="要重啟的服務名稱")
-    @app_commands.autocomplete(service=service_autocomplete)
-    async def restart(self, interaction: discord.Interaction, service: str):
-        await interaction.response.defer(ephemeral=False)
-        result = await self.system_service.restart(service)
+    @app_commands.command(name="stop", description="關閉服務")
+    @service_options(Permission.OPERATOR)
+    @control_cooldown
+    async def stop(self, interaction: discord.Interaction, service: str, backend: str = "all"):
+        await self._control(interaction, service, Action.STOP, backend)
 
-        if result.success:
-            await interaction.followup.send(f"`{service}` 重啟成功！\n```\n{result.message}\n```")
-        else:
-            await interaction.followup.send(f"`{service}` 重啟失敗：\n```\n{result.message}\n```")
+    @app_commands.command(name="restart", description="重啟服務")
+    @service_options(Permission.OPERATOR)
+    @control_cooldown
+    async def restart(self, interaction: discord.Interaction, service: str, backend: str = "all"):
+        await self._control(interaction, service, Action.RESTART, backend)
 
-    @app_commands.command(name="enable", description="設定服務開機自動啟動")
-    @app_commands.describe(service="要設定的服務名稱")
-    @app_commands.autocomplete(service=service_autocomplete)
-    async def enable(self, interaction: discord.Interaction, service: str):
-        await interaction.response.defer(ephemeral=False)
-        result = await self.system_service.enable(service)
+    @app_commands.command(name="enable", description="設定開機自動啟動（Docker：restart=unless-stopped）")
+    @service_options(Permission.OPERATOR)
+    @control_cooldown
+    async def enable(self, interaction: discord.Interaction, service: str, backend: str = "all"):
+        await self._control(interaction, service, Action.ENABLE, backend)
 
-        if result.success:
-            await interaction.followup.send(f"`{service}` 已設定為開機自動啟動！")
-        else:
-            await interaction.followup.send(f"設定開機自動啟動失敗：\n```\n{result.message}\n```")
+    @app_commands.command(name="disable", description="取消開機自動啟動（Docker：restart=no）")
+    @service_options(Permission.OPERATOR)
+    @control_cooldown
+    async def disable(self, interaction: discord.Interaction, service: str, backend: str = "all"):
+        await self._control(interaction, service, Action.DISABLE, backend)
 
-    @app_commands.command(name="disable", description="取消服務開機自動啟動")
-    @app_commands.describe(service="要取消的服務名稱")
-    @app_commands.autocomplete(service=service_autocomplete)
-    async def disable(self, interaction: discord.Interaction, service: str):
-        await interaction.response.defer(ephemeral=False)
-        result = await self.system_service.disable(service)
-
-        if result.success:
-            await interaction.followup.send(f"`{service}` 已取消開機自動啟動！")
-        else:
-            await interaction.followup.send(f"取消開機自動啟動失敗：\n```\n{result.message}\n```")
-
-    # --- 查詢與資訊指令 ---
+    # --- 查詢指令（檢視者以上，可為單一服務授權） ---
 
     @app_commands.command(name="status", description="查詢服務狀態")
-    @app_commands.describe(service="要查詢的服務名稱")
-    @app_commands.autocomplete(service=service_autocomplete)
-    async def status(self, interaction: discord.Interaction, service: str):
-        await interaction.response.defer(ephemeral=False)
-        status_info = await self.system_service.status(service)
+    @service_options(Permission.VIEWER)
+    async def status(self, interaction: discord.Interaction, service: str, backend: str = "all"):
+        await interaction.response.defer()
 
-        if status_info is not None:
-            await interaction.followup.send(
-                f"**服務 `{service}` 狀態：**\n"
-                f"• Active State: `{status_info.active}`\n"
-                f"• Enabled State: `{status_info.enabled}`\n"
-                f"• Unit: `{status_info.service.unit}`"
-            )
-        else:
-            await interaction.followup.send(f"找不到服務 `{service}` 或無法讀取狀態。")
+        try:
+            statuses = await self.system_service.status(service, parse_scope(backend))
 
-    @app_commands.command(name="logs", description="查詢服務日誌")
-    @app_commands.describe(service="要調閱的服務名稱", lines="讀取行數 (預設 50 行)")
-    @app_commands.autocomplete(service=service_autocomplete)
-    async def logs(self, interaction: discord.Interaction, service: str, lines: int = 50):
-        await interaction.response.defer(ephemeral=False)
-        log_info = await self.system_service.logs(service, lines=lines)
-
-        if log_info is None:
-            await interaction.followup.send(f"找不到服務 `{service}`。")
+        except (ServiceNotFound, InvalidServiceError) as e:
+            await interaction.followup.send(f"❌ {e}")
             return
 
-        content = log_info.content
-        if len(content) <= 1800:
-            await interaction.followup.send(f"服務 `{service}` 日誌 ({lines} 行)：\n```\n{content}\n```")
-        else:
-            log_file = discord.File(
-                fp=io.BytesIO(content.encode("utf-8")), filename=f"{service}_logs.txt",
-            )
-            await interaction.followup.send(
-                f"服務 `{service}` 的日誌過長，已改以文字檔傳送：", file=log_file,
-            )
+        lines = [f"**{service}** 狀態："] + [
+            f"• `{s.backend}` `{s.target}` — Active: `{s.active}` / Enabled: `{s.enabled}`"
+            for s in statuses
+        ]
+        await interaction.followup.send("\n".join(lines))
 
-    @app_commands.command(name="list", description="列出所有服務")
+    @app_commands.command(name="logs", description="查詢服務日誌（僅自己可見）")
+    @service_options(Permission.VIEWER)
+    @app_commands.describe(lines="每個後端讀取的行數 (1-500，預設 50 行)")
+    async def logs(
+        self,
+        interaction: discord.Interaction,
+        service: str,
+        backend: str = "all",
+        lines: app_commands.Range[int, 1, 500] = 50,
+    ):
+        # 日誌可能包含敏感資訊，只回覆給呼叫者
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            logs = await self.system_service.logs(service, parse_scope(backend), lines)
+
+        except (ServiceNotFound, InvalidServiceError) as e:
+            await interaction.followup.send(f"❌ {e}", ephemeral=True)
+            return
+
+        audit_log(interaction, "logs", service, all(log.success for log in logs), f"backend={backend}")
+        content = "\n\n".join(f"===== {log.backend}: {log.target} =====\n{log.content}" for log in logs)
+
+        if len(content) <= MAX_MESSAGE_LENGTH - 50:
+            await interaction.followup.send(f"**{service}** 日誌：\n{code_block(content)}", ephemeral=True)
+        else:
+            log_file = discord.File(fp=io.BytesIO(content.encode("utf-8")), filename=f"{service}_logs.txt")
+            await interaction.followup.send(f"**{service}** 的日誌過長，已改以文字檔傳送：", file=log_file, ephemeral=True)
+
+    @app_commands.command(name="list", description="列出你可以存取的服務")
     async def service_list(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=False)
-        services = self.system_service.get_all()
+        services = visible_services(interaction)
 
         if not services:
-            await interaction.followup.send("目前尚未註冊任何服務。請使用 `/service add` 新增。")
+            await interaction.response.send_message("沒有你可以存取的服務。", ephemeral=True)
             return
 
-        formatted_list = [f"- {s.name}: `{s.unit}`" for s in services]
-        await interaction.followup.send(f"**可管理服務清單：**\n" + "\n".join(formatted_list))
+        formatted = [f"- **{s.name}**：{describe_targets(s.targets)}" for s in services]
+        await interaction.response.send_message("**服務清單：**\n" + "\n".join(formatted))
 
-    # --- 管理維護指令 ---
+    # --- 管理指令（管理員） ---
 
-    @app_commands.command(name="add", description="新增系統服務")
-    @app_commands.describe(name="服務名稱", unit="systemd unit 檔名")
-    async def add(self, interaction: discord.Interaction, name: str, unit: str):
-        await interaction.response.defer(ephemeral=False)
-        success = self.system_service.add(name, unit)
+    @app_commands.command(name="add", description="新增服務，可同時設定 systemd unit 與 Docker 容器")
+    @app_commands.describe(
+        name="服務名稱（英數、_、-，最多 32 字）",
+        unit="systemd unit 名稱，例如 nginx.service",
+        container="Docker 容器名稱",
+    )
+    @require(Permission.ADMIN)
+    async def add(self, interaction: discord.Interaction, name: str, unit: str | None = None, container: str | None = None):
+        targets = {backend: target for backend, target in ((Backend.SYSTEMD, unit), (Backend.DOCKER, container)) if target}
+
+        try:
+            success = self.system_service.add(name, targets)
+
+        except InvalidServiceError as e:
+            await interaction.response.send_message(f"❌ 新增失敗：{e}", ephemeral=True)
+            return
+
+        audit_log(interaction, "add", name, success, str(targets))
 
         if success:
-            await interaction.followup.send(f"成功新增服務：`{name}` (`{unit}`)")
+            await interaction.response.send_message(f"✅ 已新增服務 **{name}**：{describe_targets(self.system_service.get(name).targets)}")
         else:
-            await interaction.followup.send(f"新增失敗：服務名稱 `{name}` 已存在。")
+            await interaction.response.send_message(f"❌ 新增失敗：服務 **{name}** 已存在。", ephemeral=True)
 
-    @app_commands.command(name="remove", description="移除已註冊的服務")
-    @app_commands.describe(service="要移除的服務名稱")
+    @app_commands.command(name="set", description="為服務設定或更換 systemd unit / Docker 容器")
+    @app_commands.describe(service="服務名稱", backend="後端", target="systemd unit 名稱或 Docker 容器名稱")
     @app_commands.autocomplete(service=service_autocomplete)
+    @app_commands.choices(backend=BACKEND_CHOICES)
+    @require(Permission.ADMIN)
+    async def set_target(self, interaction: discord.Interaction, service: str, backend: str, target: str):
+        await self._edit(interaction, "set", service, f"{backend}={target}",
+                         lambda: self.system_service.set_target(service, Backend(backend), target))
+
+    @app_commands.command(name="unset", description="移除服務的 systemd unit 或 Docker 容器設定")
+    @app_commands.describe(service="服務名稱", backend="要移除的後端")
+    @app_commands.autocomplete(service=service_autocomplete)
+    @app_commands.choices(backend=BACKEND_CHOICES)
+    @require(Permission.ADMIN)
+    async def unset_target(self, interaction: discord.Interaction, service: str, backend: str):
+        await self._edit(interaction, "unset", service, backend,
+                         lambda: self.system_service.unset_target(service, Backend(backend)))
+
+    async def _edit(self, interaction: discord.Interaction, action: str, service: str, detail: str, operation) -> None:
+        try:
+            updated = operation()
+
+        except (ServiceNotFound, InvalidServiceError) as e:
+            await interaction.response.send_message(f"❌ {e}", ephemeral=True)
+            return
+
+        audit_log(interaction, action, service, True, detail)
+        await interaction.response.send_message(f"✅ 服務 **{service}** 已更新：{describe_targets(updated.targets)}")
+
+    @app_commands.command(name="remove", description="移除服務（連同其單獨授權）")
+    @app_commands.describe(service="服務名稱")
+    @app_commands.autocomplete(service=service_autocomplete)
+    @require(Permission.ADMIN)
     async def remove(self, interaction: discord.Interaction, service: str):
-        await interaction.response.defer(ephemeral=False)
         success = self.system_service.remove(service)
+        audit_log(interaction, "remove", service, success)
 
         if success:
-            await interaction.followup.send(f"已成功移除服務：`{service}`")
+            self.bot.permissions.repository.remove_service(service)
+            await interaction.response.send_message(f"✅ 已移除服務 **{service}**")
         else:
-            await interaction.followup.send(f"移除失敗：找不到服務 `{service}`。")
+            await interaction.response.send_message(f"❌ 找不到服務 **{service}**", ephemeral=True)
 
 
 async def setup(bot: commands.Bot):
-    await bot.add_cog(Services(bot))
+    await bot.add_cog(Services(bot, bot.system_service))

@@ -1,37 +1,87 @@
-import os, discord, traceback
+import logging
+import pkgutil
+
+import discord
+from discord import app_commands
 from discord.ext import commands
 
-class Bot(commands.Bot):
-    def __init__(self):
-        intents = discord.Intents.all()
+from system_controller import cogs
+from system_controller.core.config import Settings
+from system_controller.core.permissions import PermissionPolicy
+from system_controller.repositories.permission_repository import PermissionRepository
+from system_controller.repositories.service_repository import ServiceRepository
+from system_controller.services.system_service import SystemService
 
+logger = logging.getLogger(__name__)
+
+
+class Bot(commands.Bot):
+    def __init__(self, settings: Settings):
+        # 斜線指令不需要任何 privileged intent
         super().__init__(
-            command_prefix = "♡",
-            intents = intents
+            command_prefix=commands.when_mentioned,
+            intents=discord.Intents.default(),
+            allowed_mentions=discord.AllowedMentions.none(),
+            help_command=None,
         )
-        
+
+        self.settings = settings
+        self.permissions = PermissionPolicy(
+            repository=PermissionRepository(settings.permissions_file),
+            owner_ids=settings.owner_user_ids,
+            allowed_guild_ids=settings.allowed_guild_ids,
+        )
+        self.system_service = SystemService(ServiceRepository(settings.services_file))
+
+        self.tree.error(self.on_app_command_error)
+
     async def setup_hook(self):
+        if not self.permissions.owner_ids:
+            await self._use_application_owners()
+
         await self.load_extensions()
         await self.tree.sync()
-    
+
+    async def _use_application_owners(self) -> None:
+        # 未設定 OWNER_USER_IDS 時，以 Discord 應用程式的擁有者（或團隊成員）作為擁有者
+        app = await self.application_info()
+        owners = {member.id for member in app.team.members} if app.team else {app.owner.id}
+        self.permissions.owner_ids.update(owners)
+        logger.warning("未設定 OWNER_USER_IDS，改以應用程式擁有者作為擁有者：%s", sorted(owners))
+
     async def load_extensions(self):
-        base_dir = os.path.dirname(os.path.dirname(__file__))
-        cogs_dir = os.path.join(base_dir, "cogs")
-        
-        target_dir = cogs_dir if os.path.exists(cogs_dir) else "./cogs"
-        
-        if not os.path.exists(target_dir):
-            print(f"找不到 cogs 目錄: {target_dir}")
-            return
-        
-        for root, _, files in os.walk(target_dir):
-            for file in files:
-                if file.endswith(".py"):
-                    rel_path = os.path.relpath(os.path.join(root, file), ".")
-                    extension = rel_path.replace(os.sep, ".")[:-3]
-                    
-                    try: await super().load_extension(extension)
-                    except Exception as e: print("Extension Load Failed", traceback.format_exc())
-    
-    async def on_ready(self): pass
-    async def close(self): await super().close()
+        for module in pkgutil.iter_modules(cogs.__path__, f"{cogs.__name__}."):
+            try:
+                await self.load_extension(module.name)
+                logger.info("已載入擴充：%s", module.name)
+
+            except Exception:
+                logger.exception("擴充載入失敗：%s", module.name)
+
+    async def on_ready(self):
+        logger.info("已登入為 %s (%s)", self.user, self.user.id if self.user else "?")
+
+    async def on_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+        # 指令內部拋出的權限錯誤會被包成 CommandInvokeError
+        if isinstance(error, app_commands.CommandInvokeError) and isinstance(error.original, app_commands.CheckFailure):
+            error = error.original
+
+        if isinstance(error, app_commands.CommandOnCooldown):
+            message = f"指令冷卻中，請在 {error.retry_after:.1f} 秒後再試。"
+        elif isinstance(error, app_commands.NoPrivateMessage):
+            message = "此指令只能在伺服器中使用。"
+        elif isinstance(error, app_commands.CheckFailure):
+            logger.warning(
+                "權限拒絕 user=%s(%s) guild=%s command=%s reason=%s",
+                interaction.user, interaction.user.id, interaction.guild_id,
+                interaction.command.qualified_name if interaction.command else "?", error,
+            )
+            message = str(error) or "你沒有權限執行此指令。"
+        else:
+            logger.error("指令執行錯誤", exc_info=error)
+            message = "執行指令時發生內部錯誤，請聯絡管理員查看日誌。"
+
+        if interaction.response.is_done():
+            await interaction.followup.send(message, ephemeral=True)
+        else:
+            await interaction.response.send_message(message, ephemeral=True)

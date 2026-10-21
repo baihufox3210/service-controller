@@ -1,74 +1,39 @@
-import asyncio
-from dataclasses import dataclass
+from system_controller.adapters.base import BackendState, CommandAdapter, CommandResult, clamp_lines
+from system_controller.models.service import Action, Backend
 
-@dataclass(slots=True)
-class CommandResult:
-    code: int
-    stdout: str
-    stderr: str
-    
-    @property
-    def success(self) -> bool:
-        return self.code == 0
-    
-class SystemdAdapter:
-    def __init__(self, sudo_path: str = "/usr/bin/sudo", systemctl_path: str = "/usr/bin/systemctl"):
-        self.sudo_path = sudo_path
+
+class SystemdAdapter(CommandAdapter):
+    """透過掛載進容器的 D-Bus socket 操作主機的 systemd；權限由主機的 polkit 規則決定。"""
+
+    backend = Backend.SYSTEMD
+
+    def __init__(self, systemctl_path: str = "/usr/bin/systemctl", journalctl_path: str = "/usr/bin/journalctl"):
         self.systemctl_path = systemctl_path
-        
-    async def _run(self, *args: str, timeout: float = 15) -> CommandResult:
-        try:
-            process = await asyncio.create_subprocess_exec(
-                *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-            )
-            
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(), timeout=timeout
-            )
-            
-            return CommandResult(
-                code=process.returncode or 0,
-                stdout=stdout.decode(errors="replace"),
-                stderr=stderr.decode(errors="replace")
-            )
-        
-        except asyncio.TimeoutError:
-            return CommandResult(
-                code=-1, stdout="", stderr="Command timed out."
-            )
-        
-        except OSError as e:
-            return CommandResult(
-                code=-1, stdout="", stderr=str(e)
-            )
-            
-    async def _systemctl(self, action: str, unit: str, *, timeout: float = 15) -> CommandResult:
-        return await self._run(
-            self.sudo_path, "-n", self.systemctl_path, action, unit, timeout=timeout
+        self.journalctl_path = journalctl_path
+
+    async def _systemctl(self, verb: str, unit: str) -> CommandResult:
+        if error := self._invalid_target(unit): return error
+
+        # "--" 確保 unit 一定被解讀為參數而非選項；--no-ask-password 避免等待互動式驗證
+        return await self._run(self.systemctl_path, "--no-ask-password", verb, "--", unit)
+
+    async def control(self, action: Action, unit: str) -> CommandResult:
+        # Action 的值與 systemctl 子指令相同
+        return await self._systemctl(Action(action).value, unit)
+
+    async def state(self, unit: str) -> BackendState:
+        active = await self._systemctl("is-active", unit)
+        enabled = await self._systemctl("is-enabled", unit)
+
+        return BackendState(
+            active=active.stdout.strip() or "unknown",
+            enabled=enabled.stdout.strip() or "unknown",
         )
-    
-    async def start(self, unit: str) -> CommandResult:
-        return await self._systemctl("start", unit)
 
-    async def stop(self, unit: str) -> CommandResult:
-        return await self._systemctl("stop", unit)
-
-    async def restart(self, unit: str) -> CommandResult:
-        return await self._systemctl("restart", unit)
-
-    async def enable(self, unit: str) -> CommandResult:
-        return await self._systemctl("enable", unit)
-
-    async def disable(self, unit: str) -> CommandResult:
-        return await self._systemctl("disable", unit)
-
-    async def is_active(self, unit: str) -> CommandResult:
-        return await self._systemctl("is-active", unit)
-
-    async def is_enabled(self, unit: str) -> CommandResult:
-        return await self._systemctl("is-enabled", unit)
-    
     async def logs(self, unit: str, lines: int = 50) -> CommandResult:
+        if error := self._invalid_target(unit): return error
+
         return await self._run(
-            "journalctl", "-u", unit, "-n", str(lines), "--no-pager",timeout=10
+            self.journalctl_path, f"--unit={unit}", "-n", str(clamp_lines(lines)), "--no-pager", "-o", "short-iso",
+            timeout=10
         )

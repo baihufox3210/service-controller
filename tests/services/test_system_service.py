@@ -2,464 +2,121 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from system_controller.adapters.systemd import CommandResult
-from system_controller.models.service import Service
-from system_controller.services.system_service import (
-    ServiceLogs,
-    ServiceOperationResult,
-    ServiceStatus,
-    SystemService,
-)
+from system_controller.adapters.base import BackendState
+from system_controller.models.service import Action, Backend, InvalidServiceError
+from system_controller.repositories.service_repository import ServiceRepository
+from system_controller.services.system_service import ServiceNotFound, SystemService
+from tests.conftest import fail, ok
 
 
 @pytest.fixture
-def repository():
-    return Mock()
+def backends():
+    return {backend: Mock(control=AsyncMock(return_value=ok())) for backend in Backend}
 
 
 @pytest.fixture
-def systemd():
-    return Mock()
+def system_service(tmp_db, backends):
+    service = SystemService(ServiceRepository(tmp_db.services), backends)
+    service.add("web", {Backend.SYSTEMD: "web.service", Backend.DOCKER: "web"})
+    service.add("db", {Backend.DOCKER: "postgres"})
+
+    return service
 
 
-@pytest.fixture
-def service():
-    return Service(
-        name="test",
-        unit="system-controller-test.service",
-    )
+def calls(backends):
+    """依呼叫順序回傳 (backend, action, target)。"""
+    order = []
+
+    for backend, mock in backends.items():
+        mock.control.side_effect = lambda action, target, backend=backend: order.append((backend, action, target)) or ok()
+
+    return order
 
 
-@pytest.fixture
-def system_service(repository, systemd):
-    return SystemService(
-        repository=repository,
-        systemd=systemd,
-    )
+@pytest.mark.asyncio
+async def test_control_all_backends_in_order(system_service, backends):
+    order = calls(backends)
+
+    results = await system_service.control("web", Action.START)
+
+    assert [r.success for r in results] == [True, True]
+    assert order == [(Backend.SYSTEMD, Action.START, "web.service"), (Backend.DOCKER, Action.START, "web")]
 
 
-def command_result(
-    *,
-    code: int = 0,
-    stdout: str = "",
-    stderr: str = "",
-) -> CommandResult:
-    return CommandResult(
-        code=code,
-        stdout=stdout,
-        stderr=stderr,
-    )
+@pytest.mark.asyncio
+async def test_stop_runs_in_reverse_order(system_service, backends):
+    order = calls(backends)
+
+    await system_service.control("web", Action.STOP)
+
+    assert [backend for backend, *_ in order] == [Backend.DOCKER, Backend.SYSTEMD]
 
 
-# ----------------------------------------------------------------------
-# get
-# ----------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_control_single_backend(system_service, backends):
+    await system_service.control("web", Action.RESTART, Backend.DOCKER)
+
+    backends[Backend.DOCKER].control.assert_awaited_once_with(Action.RESTART, "web")
+    backends[Backend.SYSTEMD].control.assert_not_called()
 
 
-def test_get_returns_registered_service(
-    system_service,
-    repository,
-    service,
-):
-    repository.get.return_value = service
+@pytest.mark.asyncio
+async def test_control_reports_failure(system_service, backends):
+    backends[Backend.SYSTEMD].control.return_value = fail("Unit not found.")
 
-    result = system_service.get("test")
+    results = await system_service.control("web", Action.START)
 
-    assert result is service
-    repository.get.assert_called_once_with("test")
-
-
-def test_get_returns_none_for_unknown_service(
-    system_service,
-    repository,
-):
-    repository.get.return_value = None
-
-    result = system_service.get("unknown")
-
-    assert result is None
-    repository.get.assert_called_once_with("unknown")
-
-
-# ----------------------------------------------------------------------
-# get_all
-# ----------------------------------------------------------------------
-
-
-def test_get_all_returns_registered_services(
-    system_service,
-    repository,
-    service,
-):
-    services = [
-        service,
-        Service(
-            name="another",
-            unit="another.service",
-        ),
+    assert [(r.backend, r.success, r.message) for r in results] == [
+        (Backend.SYSTEMD, False, "Unit not found."),
+        (Backend.DOCKER, True, ""),
     ]
 
-    repository.get_all.return_value = services
 
-    result = system_service.get_all()
+@pytest.mark.asyncio
+async def test_control_errors(system_service):
+    with pytest.raises(ServiceNotFound):
+        await system_service.control("ghost", Action.START)
 
-    assert result == services
-    repository.get_all.assert_called_once_with()
-
-
-# ----------------------------------------------------------------------
-# start
-# ----------------------------------------------------------------------
+    with pytest.raises(InvalidServiceError):
+        await system_service.control("db", Action.START, Backend.SYSTEMD)
 
 
 @pytest.mark.asyncio
-async def test_start_success(
-    system_service,
-    repository,
-    systemd,
-    service,
-):
-    repository.get.return_value = service
-    systemd.start = AsyncMock(
-        return_value=command_result()
-    )
+async def test_status_and_logs(system_service, backends):
+    backends[Backend.SYSTEMD].state = AsyncMock(return_value=BackendState("active", "enabled"))
+    backends[Backend.DOCKER].state = AsyncMock(return_value=BackendState("running", "disabled"))
+    backends[Backend.SYSTEMD].logs = AsyncMock(return_value=ok("a\n"))
+    backends[Backend.DOCKER].logs = AsyncMock(return_value=fail("daemon down"))
 
-    result = await system_service.start("test")
+    statuses = await system_service.status("web")
+    logs = await system_service.logs("web", lines=10)
 
-    assert isinstance(result, ServiceOperationResult)
-    assert result.success is True
-    assert result.service is service
-    assert result.message == "Service started successfully."
+    assert [(s.backend, s.active) for s in statuses] == [(Backend.SYSTEMD, "active"), (Backend.DOCKER, "running")]
+    assert [(log.success, log.message) for log in logs] == [(True, "a"), (False, "daemon down")]
+    backends[Backend.DOCKER].logs.assert_awaited_once_with("web", 10)
 
-    systemd.start.assert_awaited_once_with(
-        "system-controller-test.service"
-    )
 
+def test_set_and_unset_target(system_service):
+    assert system_service.set_target("db", Backend.SYSTEMD, "postgresql.service").targets == {
+        Backend.SYSTEMD: "postgresql.service", Backend.DOCKER: "postgres",
+    }
+    assert system_service.unset_target("db", Backend.DOCKER).targets == {Backend.SYSTEMD: "postgresql.service"}
 
-@pytest.mark.asyncio
-async def test_start_unknown_service(
-    system_service,
-    repository,
-    systemd,
-):
-    repository.get.return_value = None
+    with pytest.raises(InvalidServiceError):
+        system_service.unset_target("db", Backend.SYSTEMD)  # 不能移除最後一個後端
 
-    result = await system_service.start("unknown")
+    with pytest.raises(InvalidServiceError):
+        system_service.set_target("db", Backend.DOCKER, "--privileged")
 
-    assert result.success is False
-    assert result.service is None
-    assert result.message == "Unknown service: unknown"
+    with pytest.raises(ServiceNotFound):
+        system_service.set_target("ghost", Backend.DOCKER, "x")
 
-    systemd.start.assert_not_called()
 
+def test_add_and_remove(system_service):
+    assert system_service.add("web", {Backend.DOCKER: "x"}) is False
 
-@pytest.mark.asyncio
-async def test_start_failure(
-    system_service,
-    repository,
-    systemd,
-    service,
-):
-    repository.get.return_value = service
+    with pytest.raises(InvalidServiceError):
+        system_service.add("new", {})
 
-    systemd.start = AsyncMock(
-        return_value=command_result(
-            code=1,
-            stderr="Failed to start service.",
-        )
-    )
-
-    result = await system_service.start("test")
-
-    assert result.success is False
-    assert result.service is service
-    assert result.message == "Failed to start service."
-
-    systemd.start.assert_awaited_once_with(
-        "system-controller-test.service"
-    )
-
-
-# ----------------------------------------------------------------------
-# stop
-# ----------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_stop_success(
-    system_service,
-    repository,
-    systemd,
-    service,
-):
-    repository.get.return_value = service
-    systemd.stop = AsyncMock(
-        return_value=command_result()
-    )
-
-    result = await system_service.stop("test")
-
-    assert result.success is True
-    assert result.service is service
-    assert result.message == "Service stopped successfully."
-
-    systemd.stop.assert_awaited_once_with(
-        service.unit
-    )
-
-
-# ----------------------------------------------------------------------
-# restart
-# ----------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_restart_success(
-    system_service,
-    repository,
-    systemd,
-    service,
-):
-    repository.get.return_value = service
-    systemd.restart = AsyncMock(
-        return_value=command_result()
-    )
-
-    result = await system_service.restart("test")
-
-    assert result.success is True
-    assert result.service is service
-    assert result.message == "Service restarted successfully."
-
-    systemd.restart.assert_awaited_once_with(
-        service.unit
-    )
-
-
-# ----------------------------------------------------------------------
-# enable
-# ----------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_enable_success(
-    system_service,
-    repository,
-    systemd,
-    service,
-):
-    repository.get.return_value = service
-    systemd.enable = AsyncMock(
-        return_value=command_result()
-    )
-
-    result = await system_service.enable("test")
-
-    assert result.success is True
-    assert result.service is service
-    assert result.message == "Service enabled successfully."
-
-    systemd.enable.assert_awaited_once_with(
-        service.unit
-    )
-
-
-# ----------------------------------------------------------------------
-# disable
-# ----------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_disable_success(
-    system_service,
-    repository,
-    systemd,
-    service,
-):
-    repository.get.return_value = service
-    systemd.disable = AsyncMock(
-        return_value=command_result()
-    )
-
-    result = await system_service.disable("test")
-
-    assert result.success is True
-    assert result.service is service
-    assert result.message == "Service disabled successfully."
-
-    systemd.disable.assert_awaited_once_with(
-        service.unit
-    )
-
-
-# ----------------------------------------------------------------------
-# status
-# ----------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_status_success(
-    system_service,
-    repository,
-    systemd,
-    service,
-):
-    repository.get.return_value = service
-
-    systemd.is_active = AsyncMock(
-        return_value=command_result(
-            stdout="active\n"
-        )
-    )
-
-    systemd.is_enabled = AsyncMock(
-        return_value=command_result(
-            stdout="enabled\n"
-        )
-    )
-
-    result = await system_service.status("test")
-
-    assert isinstance(result, ServiceStatus)
-    assert result.service is service
-    assert result.active == "active"
-    assert result.enabled == "enabled"
-
-    systemd.is_active.assert_awaited_once_with(
-        service.unit
-    )
-
-    systemd.is_enabled.assert_awaited_once_with(
-        service.unit
-    )
-
-
-@pytest.mark.asyncio
-async def test_status_unknown_service(
-    system_service,
-    repository,
-    systemd,
-):
-    repository.get.return_value = None
-
-    result = await system_service.status("unknown")
-
-    assert result is None
-
-    systemd.is_active.assert_not_called()
-    systemd.is_enabled.assert_not_called()
-
-
-# ----------------------------------------------------------------------
-# logs
-# ----------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_logs_success(
-    system_service,
-    repository,
-    systemd,
-    service,
-):
-    repository.get.return_value = service
-
-    systemd.logs = AsyncMock(
-        return_value=command_result(
-            stdout="line 1\nline 2\nline 3\n"
-        )
-    )
-
-    result = await system_service.logs("test", lines=50)
-
-    assert isinstance(result, ServiceLogs)
-    assert result.service is service
-    assert result.content == "line 1\nline 2\nline 3"
-
-    systemd.logs.assert_awaited_once_with(
-        service.unit,
-        50,
-    )
-
-
-@pytest.mark.asyncio
-async def test_logs_failure(
-    system_service,
-    repository,
-    systemd,
-    service,
-):
-    repository.get.return_value = service
-
-    systemd.logs = AsyncMock(
-        return_value=command_result(
-            code=1,
-            stderr="journalctl failed",
-        )
-    )
-
-    result = await system_service.logs("test")
-
-    assert isinstance(result, ServiceLogs)
-    assert result.service is service
-    assert result.content == "journalctl failed"
-
-
-@pytest.mark.asyncio
-async def test_logs_unknown_service(
-    system_service,
-    repository,
-    systemd,
-):
-    repository.get.return_value = None
-
-    result = await system_service.logs("unknown")
-
-    assert result is None
-
-    systemd.logs.assert_not_called()
-
-
-# ----------------------------------------------------------------------
-# add
-# ----------------------------------------------------------------------
-
-
-def test_add_service(
-    system_service,
-    repository,
-):
-    repository.add.return_value = True
-
-    result = system_service.add(
-        name="test",
-        unit="system-controller-test.service",
-    )
-
-    assert result is True
-
-    repository.add.assert_called_once()
-
-    added_service = repository.add.call_args.args[0]
-
-    assert isinstance(added_service, Service)
-    assert added_service.name == "test"
-    assert added_service.unit == "system-controller-test.service"
-
-
-# ----------------------------------------------------------------------
-# remove
-# ----------------------------------------------------------------------
-
-
-def test_remove_service(
-    system_service,
-    repository,
-):
-    repository.remove.return_value = True
-
-    result = system_service.remove("test")
-
-    assert result is True
-
-    repository.remove.assert_called_once_with("test")
+    assert system_service.remove("web") is True
+    assert [s.name for s in system_service.get_all()] == ["db"]
