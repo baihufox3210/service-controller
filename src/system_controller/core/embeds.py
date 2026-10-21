@@ -89,7 +89,7 @@ def control_result(service: str, action_label: str, results: Sequence[BackendRes
 
 
 def status(service: str, statuses: Sequence[BackendStatus]) -> discord.Embed:
-    healths = [health_of(s.active) for s in statuses]
+    healths = [Health.FAILED if s.error else health_of(s.active) for s in statuses]
 
     # 顏色取最嚴重的狀態
     if Health.FAILED in healths:
@@ -102,11 +102,12 @@ def status(service: str, statuses: Sequence[BackendStatus]) -> discord.Embed:
     embed = discord.Embed(title=f"{service} 狀態", color=color)
 
     for s, health in zip(statuses, healths, strict=True):
-        embed.add_field(
-            name=backend_label(s.backend, s.target),
-            value=f"執行狀態：**{health.label}**（`{s.active}`）\n開機啟動：`{s.enabled}`",
-            inline=False,
-        )
+        if s.error:
+            value = f"**無法查詢狀態**\n{code_block(s.error, limit=900)}"
+        else:
+            value = f"執行狀態：**{health.label}**（`{s.active}`）\n開機啟動：`{s.enabled}`"
+
+        embed.add_field(name=backend_label(s.backend, s.target), value=value, inline=False)
 
     return embed
 

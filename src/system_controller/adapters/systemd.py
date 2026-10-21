@@ -25,9 +25,13 @@ class SystemdAdapter(CommandAdapter):
         active = await self._systemctl("is-active", unit)
         enabled = await self._systemctl("is-enabled", unit)
 
+        # 服務未執行時 is-active 也會回傳非 0，但仍會輸出狀態；沒有輸出才代表查詢失敗
+        errors = [result.stderr.strip() or "查詢失敗" for result in (active, enabled) if not result.stdout.strip()]
+
         return BackendState(
             active=active.stdout.strip() or "unknown",
             enabled=enabled.stdout.strip() or "unknown",
+            error="\n".join(dict.fromkeys(errors)) or None,
         )
 
     async def logs(self, unit: str, lines: int = 50) -> CommandResult:
