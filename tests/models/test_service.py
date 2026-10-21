@@ -28,7 +28,9 @@ def test_select_unconfigured_backend():
         ("x" * 33, {Backend.SYSTEMD: "ok.service"}),
         ("ok", {}),
         ("ok", {Backend.SYSTEMD: "--help"}),
-        ("ok", {Backend.SYSTEMD: "nginx"}),
+        ("ok", {Backend.SYSTEMD: "multi-user.target"}),
+        ("ok", {Backend.SYSTEMD: "home.mount"}),
+        ("ok", {Backend.SYSTEMD: "-H"}),
         ("ok", {Backend.SYSTEMD: "../x.service"}),
         ("ok", {Backend.DOCKER: "-rm"}),
         ("ok", {Backend.DOCKER: "a/b"}),
@@ -38,3 +40,22 @@ def test_select_unconfigured_backend():
 def test_rejects_invalid(name, targets):
     with pytest.raises(InvalidServiceError):
         Service(name, targets)
+
+
+@pytest.mark.parametrize(
+    ("unit", "expected"),
+    [
+        ("nginx", "nginx.service"),
+        ("nginx.service", "nginx.service"),
+        ("backup.timer", "backup.timer"),
+        ("docker.socket", "docker.socket"),
+        ("getty@tty1", "getty@tty1.service"),
+    ],
+)
+def test_systemd_suffix_defaults_to_service(unit, expected):
+    assert Service("ok", {Backend.SYSTEMD: unit}).targets[Backend.SYSTEMD] == expected
+
+
+def test_invalid_unit_error_shows_original_input():
+    with pytest.raises(InvalidServiceError, match="'a b'"):
+        Service("ok", {Backend.SYSTEMD: "a b"})
