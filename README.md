@@ -77,16 +77,15 @@ getent group systemd-journal | cut -d: -f3  # → JOURNAL_GID
 
 ### 2. 設定 systemd 權限（只用 Docker 後端可略過）
 
-容器以 UID `10001` 執行。在主機建立同 UID 的使用者，並安裝 polkit 規則，只開放指定 unit 的 start / stop / restart：
+容器以 UID `10001` 執行。在主機建立同 UID 的使用者，並安裝 polkit 規則，允許它操作主機上的 systemd unit（實際可操作的服務由 `/service add` 註冊的服務決定）：
 
 ```bash
 sudo useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin svcbot
 sudo cp deploy/polkit/50-service-controller.rules /etc/polkit-1/rules.d/
-sudo nano /etc/polkit-1/rules.d/50-service-controller.rules   # 編輯 ALLOWED_UNITS
 ```
 
 - 規則檔需要使用 JavaScript 規則的 polkit（polkit 0.106 以上，Debian 12+、Ubuntu 23.04+ 等）。
-- systemd 的 `enable` / `disable` 需要 `manage-unit-files` 與 `reload-daemon` 權限，規則檔已開放。⚠️ polkit 無法把這兩項限制到單一 unit，等同讓 `svcbot` 擁有主機 root 權限；不需要時可刪除規則檔中的那一段。
+- ⚠️ 此規則等同讓 `svcbot` 擁有主機 root 權限，請妥善保護 `BOT_TOKEN`。
 - 日誌需要主機啟用持久化 journal（`/var/log/journal` 存在）。
 
 ### 3. 啟動
@@ -116,7 +115,7 @@ docker compose cp service-controller:/app/database ./backup
 - 只能操作透過 `/service add` 註冊過的服務；一般使用者無法直接指定任意 unit 或容器。
 - 子程序以參數陣列執行（不經過 shell），逾時會被強制終止。
 - 容器以非 root（UID 10001）執行，根目錄唯讀、移除所有 capabilities、啟用 `no-new-privileges`，並限制記憶體與行程數。
-- systemd 操作的權限由主機 polkit 以 unit 白名單控制。
+- systemd 操作透過主機 polkit 授權給專用使用者 `svcbot`，不使用 sudo。
 - 機器人不會發出任何 @mention，輸出內容會跳脫程式碼區塊，日誌回覆僅呼叫者可見。
 - 資料檔以原子寫入（暫存檔 + rename）儲存，檔案權限 `600`。
 - 不需要任何 privileged gateway intent。
