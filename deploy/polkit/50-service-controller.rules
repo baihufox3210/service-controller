@@ -22,11 +22,12 @@ polkit.addRule(function (action, subject) {
         }
     }
 
-    // enable / disable 需要 manage-unit-files，但 polkit 無法限制到單一 unit，
-    // 開放後可啟用主機上任意 unit 檔，等同 root 權限。確定接受風險才取消註解。
-    // if (action.id === "org.freedesktop.systemd1.manage-unit-files") {
-    //     return polkit.Result.YES;
-    // }
+    // enable / disable 需要 manage-unit-files，完成後 systemctl 會再執行 daemon-reload。
+    // ⚠️ polkit 無法把這兩項限制到單一 unit，開放後可啟用主機上任意 unit 檔，等同 root 權限。
+    if (action.id === "org.freedesktop.systemd1.manage-unit-files" ||
+        action.id === "org.freedesktop.systemd1.reload-daemon") {
+        return polkit.Result.YES;
+    }
 
     return polkit.Result.NOT_HANDLED;
 });

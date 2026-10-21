@@ -86,7 +86,7 @@ sudo nano /etc/polkit-1/rules.d/50-service-controller.rules   # 編輯 ALLOWED_U
 ```
 
 - 規則檔需要使用 JavaScript 規則的 polkit（polkit 0.106 以上，Debian 12+、Ubuntu 23.04+ 等）。
-- systemd 的 `enable` / `disable` 需要 `manage-unit-files` 權限。polkit 無法把它限制到單一 unit，開放等同 root，因此預設不開放（規則檔內有註解說明）。
+- systemd 的 `enable` / `disable` 需要 `manage-unit-files` 與 `reload-daemon` 權限，規則檔已開放。⚠️ polkit 無法把這兩項限制到單一 unit，等同讓 `svcbot` 擁有主機 root 權限；不需要時可刪除規則檔中的那一段。
 - 日誌需要主機啟用持久化 journal（`/var/log/journal` 存在）。
 
 ### 3. 啟動
