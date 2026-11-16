@@ -15,6 +15,8 @@ pub enum Scope {
     Systemd,
     #[name = "Docker"]
     Docker,
+    #[name = "腳本"]
+    Script,
 }
 
 impl Scope {
@@ -22,6 +24,7 @@ impl Scope {
         match scope {
             Some(Scope::Systemd) => Some(Backend::Systemd),
             Some(Scope::Docker) => Some(Backend::Docker),
+            Some(Scope::Script) => Some(Backend::Script),
             Some(Scope::All) | None => None,
         }
     }
@@ -112,7 +115,7 @@ pub async fn stop(
     control(ctx, service, Action::Stop, backend).await
 }
 
-/// 重啟服務
+/// 重啟服務（有設定腳本時改為執行腳本）
 #[poise::command(slash_command, guild_only, user_cooldown = 5)]
 pub async fn restart(
     ctx: Context<'_>,

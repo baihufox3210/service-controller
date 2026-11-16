@@ -43,6 +43,9 @@ struct Entry {
     systemd: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     docker: Option<String>,
+    /// 主機上註冊過的腳本名稱（不是路徑）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    script: Option<String>,
 }
 
 /// 從整則訊息中取出唯一的 ``` 程式碼區塊內容。
@@ -88,9 +91,10 @@ pub fn parse_services(text: &str) -> Result<Vec<Service>, ConfigError> {
     entries
         .into_iter()
         .map(|(name, entry)| {
-            let targets = [(Backend::Systemd, entry.systemd), (Backend::Docker, entry.docker)]
-                .into_iter()
-                .filter_map(|(backend, target)| target.map(|t| (backend, t)));
+            let targets =
+                [(Backend::Systemd, entry.systemd), (Backend::Docker, entry.docker), (Backend::Script, entry.script)]
+                    .into_iter()
+                    .filter_map(|(backend, target)| target.map(|t| (backend, t)));
 
             Service::new(&name, targets).map_err(ConfigError::from)
         })
@@ -105,6 +109,7 @@ pub fn render_services<'a>(services: impl IntoIterator<Item = &'a Service>) -> S
             let entry = Entry {
                 systemd: targets.get(&Backend::Systemd).cloned(),
                 docker: targets.get(&Backend::Docker).cloned(),
+                script: targets.get(&Backend::Script).cloned(),
             };
             (service.name(), entry)
         })
@@ -117,7 +122,7 @@ pub fn render_services<'a>(services: impl IntoIterator<Item = &'a Service>) -> S
 mod tests {
     use super::*;
 
-    const MESSAGE: &str = "!services set\n```toml\n[blog]\nsystemd = \"baihu-blog-api\"\ndocker = \"my-dashboard\"\n\n[mem0]\ndocker = \"mem0-dev-mem0-1\"\n```";
+    const MESSAGE: &str = "!services set\n```toml\n[blog]\nsystemd = \"baihu-blog-api\"\ndocker = \"my-dashboard\"\nscript = \"blog-restart\"\n\n[mem0]\ndocker = \"mem0-dev-mem0-1\"\n```";
 
     #[test]
     fn parses_message_with_code_block() {
@@ -126,6 +131,7 @@ mod tests {
         assert_eq!(services.len(), 2);
         assert_eq!(services[0].name(), "blog");
         assert_eq!(services[0].targets()[&Backend::Systemd], "baihu-blog-api.service");
+        assert_eq!(services[0].targets()[&Backend::Script], "blog-restart");
         assert_eq!(services[1].targets().get(&Backend::Systemd), None);
     }
 
@@ -152,6 +158,9 @@ mod tests {
         let cases = [
             "[blog]\nsystemd = \"x; rm -rf /\"",
             "[blog]\ndocker = \"--privileged\"",
+            "[blog]\nscript = \"/home/baihu/bin/blog-restart.sh\"", // 只能填名稱，不能填路徑
+            "[blog]\nscript = \"../../bin/sh\"",
+            "[blog]\nscript = \"x; rm -rf /\"",
             "[blog]\nsystemd = \"multi-user.target\"",
             "[blog]\ncommand = \"sh -c id\"", // 未知欄位
             "[blog]\nsystemd = 1",            // 型別錯誤

@@ -31,8 +31,9 @@ fn usage(prefix: &str) -> String {
          **{p}services set** + 程式碼區塊\n新增或更新區塊中列出的服務，其他服務維持不變\n\n\
          **{p}services replace** + 程式碼區塊\n以區塊內容完整取代目前的設定（未列出的服務會被移除）\n\n\
          **{p}services remove** 名稱 [名稱 ...]\n移除指定的服務\n\n\
-         設定格式：\n```toml\n[blog]\nsystemd = \"baihu-blog-api\"   # 可省略 .service\ndocker = \"my-dashboard\"\n```\n\
-         每個服務至少要設定 systemd 或 docker 其中之一；最多 {MAX_SERVICES} 個服務、{MAX_CONFIG_BYTES} bytes。",
+         設定格式：\n```toml\n[blog]\nsystemd = \"baihu-blog-api\"   # 可省略 .service\ndocker = \"my-dashboard\"\nscript = \"blog-restart\"     # 主機上註冊的腳本名稱\n```\n\
+         每個服務至少要設定 systemd、docker、script 其中之一；最多 {MAX_SERVICES} 個服務、{MAX_CONFIG_BYTES} bytes。\n\
+         有設定 script 時，/service restart 會改為執行腳本。腳本需先在主機上用 scripts/register-script.sh 註冊。",
         p = prefix
     )
 }

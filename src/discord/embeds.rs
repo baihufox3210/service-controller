@@ -17,8 +17,36 @@ const MESSAGE_LIMIT: usize = 6000;
 
 /// 包成程式碼區塊，避免內容提前關閉區塊；只保留最後 `limit` 個字元。
 pub fn code_block(text: &str, limit: usize) -> String {
+    let text = strip_ansi(text);
     let text = if text.trim().is_empty() { "(無輸出)".to_owned() } else { text.replace("```", "`\u{200b}``") };
     format!("```\n{}\n```", tail(&text, limit).0)
+}
+
+/// 移除終端機顏色等 ANSI 控制碼（腳本輸出常帶有這些字元）。
+pub fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+
+        // CSI：ESC [ 參數 最後一個字元落在 @..~
+        if chars.peek() == Some(&'[') {
+            chars.next();
+            for c in chars.by_ref() {
+                if ('@'..='~').contains(&c) {
+                    break;
+                }
+            }
+        } else {
+            chars.next();
+        }
+    }
+
+    out
 }
 
 /// 保留最後 `limit` 個字元（從完整的一行開始），回傳是否被截斷。
@@ -68,7 +96,11 @@ pub fn control_result(service: &str, action_label: &str, results: &[BackendResul
     };
 
     let fields = results.iter().map(|r| {
-        let value = if r.success { "成功".to_owned() } else { format!("失敗\n{}", code_block(&r.message, 900)) };
+        let value = match (r.success, r.message.is_empty()) {
+            (true, true) => "成功".to_owned(),
+            (true, false) => format!("成功\n{}", code_block(&r.message, 900)),
+            (false, _) => format!("失敗\n{}", code_block(&r.message, 900)),
+        };
         (backend_label(r.backend, &r.target), value, false)
     });
 
@@ -87,6 +119,16 @@ impl Health {
     fn of(status: &BackendStatus) -> Self {
         if status.error.is_some() {
             return Health::Failed;
+        }
+
+        if status.backend == Backend::Script {
+            // 腳本的 active 是上次執行的結果
+            return match status.active.as_str() {
+                "success" => Health::Running,
+                "running" => Health::Transition,
+                "never" => Health::Stopped,
+                _ => Health::Failed,
+            };
         }
 
         match status.active.as_str() {
@@ -124,6 +166,15 @@ pub fn status(service: &str, statuses: &[BackendStatus]) -> CreateEmbed {
     let fields = statuses.iter().zip(&healths).map(|(s, health)| {
         let value = match &s.error {
             Some(error) => format!("**無法查詢狀態**\n{}", code_block(error, 900)),
+            None if s.backend == Backend::Script => {
+                let label = match health {
+                    Health::Running => "成功",
+                    Health::Transition => "執行中",
+                    Health::Stopped => "尚未執行",
+                    Health::Failed => "失敗",
+                };
+                format!("上次執行：**{label}**（`{}`）\n時間：`{}`", s.active, s.enabled)
+            }
             None => format!("執行狀態：**{}**（`{}`）\n開機啟動：`{}`", health.label(), s.active, s.enabled),
         };
         (backend_label(s.backend, &s.target), value, false)
@@ -182,6 +233,12 @@ pub fn field_value(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strips_ansi_codes() {
+        assert_eq!(strip_ansi("\u{1b}[1m==> 建置\u{1b}[0m ok \u{1b}[31m[停止]\u{1b}[0m"), "==> 建置 ok [停止]");
+        assert_eq!(code_block("\u{1b}[33mwarn\u{1b}[0m", 100), "```\nwarn\n```");
+    }
 
     #[test]
     fn code_block_cannot_be_escaped() {

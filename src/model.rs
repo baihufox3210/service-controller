@@ -11,6 +11,8 @@ use thiserror::Error;
 pub enum Backend {
     Systemd,
     Docker,
+    /// 主機上以 scripts/register-script.sh 註冊的腳本（systemd oneshot unit）
+    Script,
 }
 
 impl Backend {
@@ -18,6 +20,7 @@ impl Backend {
         match self {
             Backend::Systemd => "systemd",
             Backend::Docker => "docker",
+            Backend::Script => "script",
         }
     }
 }
@@ -73,10 +76,14 @@ pub enum ValidationError {
     InvalidTarget { backend: Backend, target: String },
     #[error("不支援的 systemd unit 類型：.{0}（僅限 service、socket、timer）")]
     UnsupportedUnitType(String),
-    #[error("服務 {0} 至少需要設定 systemd 或 docker 其中之一")]
+    #[error("服務 {0} 至少需要設定 systemd、docker、script 其中之一")]
     NoTargets(String),
     #[error("服務 {service} 未設定 {backend}")]
     NotConfigured { service: String, backend: Backend },
+    #[error("腳本只支援 restart")]
+    ScriptActionUnsupported,
+    #[error("服務 {0} 只設定了腳本，腳本只支援 restart")]
+    OnlyScript(String),
 }
 
 const MAX_NAME_LEN: usize = 32;
@@ -88,11 +95,18 @@ const SYSTEMD_SUFFIXES: [&str; 3] = ["service", "socket", "timer"];
 /// 其他 systemd unit 類型一律拒絕，不會被補上 .service。
 const OTHER_SYSTEMD_SUFFIXES: [&str; 8] = ["target", "mount", "automount", "swap", "path", "slice", "scope", "device"];
 
-pub fn validate_name(name: &str) -> Result<(), ValidationError> {
-    let valid = (1..=MAX_NAME_LEN).contains(&name.len())
-        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+fn is_valid_name(name: &str) -> bool {
+    (1..=MAX_NAME_LEN).contains(&name.len())
+        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
 
-    if valid { Ok(()) } else { Err(ValidationError::InvalidName(name.to_owned())) }
+pub fn validate_name(name: &str) -> Result<(), ValidationError> {
+    if is_valid_name(name) { Ok(()) } else { Err(ValidationError::InvalidName(name.to_owned())) }
+}
+
+/// 腳本名稱只能引用主機上註冊過的名稱，格式與服務名稱相同，且必須以英數開頭。
+fn is_valid_script(name: &str) -> bool {
+    is_valid_name(name) && name.bytes().next().is_some_and(|b| b.is_ascii_alphanumeric())
 }
 
 /// 所有 target 都必須以英數字開頭，避免被命令列工具當成選項（例如 `--help`）。
@@ -116,6 +130,7 @@ pub fn validate_target(backend: Backend, target: &str) -> Result<(), ValidationE
     let valid = match backend {
         Backend::Systemd => is_valid_unit(target),
         Backend::Docker => is_valid_container(target),
+        Backend::Script => is_valid_script(target),
     };
 
     if valid { Ok(()) } else { Err(ValidationError::InvalidTarget { backend, target: target.to_owned() }) }
@@ -126,7 +141,7 @@ pub fn normalize_target(backend: Backend, raw: &str) -> Result<String, Validatio
     let invalid = || ValidationError::InvalidTarget { backend, target: raw.to_owned() };
 
     let target = match backend {
-        Backend::Docker => raw.to_owned(),
+        Backend::Docker | Backend::Script => raw.to_owned(),
         Backend::Systemd => match raw.rsplit_once('.').map(|(_, suffix)| suffix) {
             Some(suffix) if OTHER_SYSTEMD_SUFFIXES.contains(&suffix) => {
                 return Err(ValidationError::UnsupportedUnitType(suffix.to_owned()));
@@ -145,7 +160,7 @@ pub fn normalize_target(backend: Backend, raw: &str) -> Result<String, Validatio
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Service {
     name: String,
-    // BTreeMap 依 Backend 排序：systemd 在前、docker 在後
+    // BTreeMap 依 Backend 排序：systemd、docker、script
     targets: BTreeMap<Backend, String>,
 }
 
@@ -183,6 +198,34 @@ impl Service {
                 .map(|target| vec![(backend, target.clone())])
                 .ok_or_else(|| ValidationError::NotConfigured { service: self.name.clone(), backend }),
         }
+    }
+
+    /// 決定一個操作要對哪些後端執行。
+    ///
+    /// 有設定腳本時，`restart`（未指定後端）只執行腳本，由腳本負責完整的重啟流程；
+    /// 其他操作不會動到腳本，腳本也不能用 restart 以外的操作執行。
+    pub fn plan(&self, action: Action, scope: Option<Backend>) -> Result<Vec<(Backend, String)>, ValidationError> {
+        let mut targets = self.select(scope)?;
+
+        match scope {
+            Some(Backend::Script) if action != Action::Restart => return Err(ValidationError::ScriptActionUnsupported),
+            Some(_) => {}
+            None => {
+                let has_script = self.targets.contains_key(&Backend::Script);
+                targets
+                    .retain(|(backend, _)| (*backend == Backend::Script) == (has_script && action == Action::Restart));
+
+                if targets.is_empty() {
+                    return Err(ValidationError::OnlyScript(self.name.clone()));
+                }
+            }
+        }
+
+        if action.runs_in_reverse() {
+            targets.reverse();
+        }
+
+        Ok(targets)
     }
 }
 
@@ -223,6 +266,39 @@ mod tests {
     fn invalid_target_error_shows_original_input() {
         let err = normalize_target(Backend::Systemd, "a b").unwrap_err();
         assert_eq!(err, ValidationError::InvalidTarget { backend: Backend::Systemd, target: "a b".into() });
+    }
+
+    #[test]
+    fn script_names_are_strict() {
+        assert_eq!(normalize_target(Backend::Script, "blog-restart").unwrap(), "blog-restart");
+
+        for raw in ["-x", "_x", "../x", "/home/baihu/bin/x.sh", "x.sh", "x y", "x;id", "$(id)", "", &"a".repeat(33)] {
+            assert!(normalize_target(Backend::Script, raw).is_err(), "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn plan_runs_script_only_for_restart() {
+        let all = [
+            (Backend::Systemd, "api".to_owned()),
+            (Backend::Docker, "web".to_owned()),
+            (Backend::Script, "blog-restart".to_owned()),
+        ];
+        let service = Service::new("blog", all).unwrap();
+        let backends = |plan: Vec<(Backend, String)>| plan.into_iter().map(|(b, _)| b).collect::<Vec<_>>();
+
+        assert_eq!(backends(service.plan(Action::Restart, None).unwrap()), [Backend::Script]);
+        assert_eq!(backends(service.plan(Action::Stop, None).unwrap()), [Backend::Docker, Backend::Systemd]);
+        assert_eq!(backends(service.plan(Action::Start, None).unwrap()), [Backend::Systemd, Backend::Docker]);
+        assert_eq!(backends(service.plan(Action::Restart, Some(Backend::Docker)).unwrap()), [Backend::Docker]);
+        assert_eq!(backends(service.plan(Action::Restart, Some(Backend::Script)).unwrap()), [Backend::Script]);
+        assert_eq!(service.plan(Action::Stop, Some(Backend::Script)), Err(ValidationError::ScriptActionUnsupported));
+
+        let script_only = Service::new("deploy", [(Backend::Script, "deploy".to_owned())]).unwrap();
+        assert_eq!(script_only.plan(Action::Stop, None), Err(ValidationError::OnlyScript("deploy".into())));
+
+        let no_script = Service::new("db", [(Backend::Docker, "pg".to_owned())]).unwrap();
+        assert_eq!(backends(no_script.plan(Action::Restart, None).unwrap()), [Backend::Docker]);
     }
 
     #[test]

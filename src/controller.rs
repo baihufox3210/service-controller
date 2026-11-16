@@ -58,11 +58,8 @@ impl Controller {
         action: Action,
         scope: Option<Backend>,
     ) -> Result<Vec<BackendResult>, ControlError> {
-        let mut targets = self.targets(name, scope)?;
-
-        if action.runs_in_reverse() {
-            targets.reverse();
-        }
+        let service = self.registry.get(name).ok_or_else(|| ControlError::NotFound(name.to_owned()))?;
+        let targets = service.plan(action, scope)?;
 
         let lock = self.locks.lock().unwrap().entry(name.to_owned()).or_default().clone();
         let _guard = lock.lock().await;
@@ -71,7 +68,17 @@ impl Controller {
 
         for (backend, target) in targets {
             let result = self.backends.control(backend, action, &target).await;
-            let message = if result.success() { String::new() } else { result.error_message() };
+            let message = match (backend, result.success()) {
+                // 腳本不論成功與否都回傳這次執行的輸出
+                (Backend::Script, true) => result.stdout.trim().to_owned(),
+                (Backend::Script, false) => [result.error_message(), result.stdout.trim().to_owned()]
+                    .into_iter()
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("\n\n"),
+                (_, true) => String::new(),
+                (_, false) => result.error_message(),
+            };
             results.push(BackendResult { backend, target, success: result.success(), message });
         }
 
@@ -118,20 +125,67 @@ impl Controller {
 pub mod tests {
     use super::*;
     use crate::backend::testing::{FakeRunner, fail, ok};
-    use crate::backend::{DockerAdapter, SystemdAdapter};
+    use crate::backend::{DockerAdapter, ScriptAdapter, SystemdAdapter};
     use crate::model::Service;
 
     pub fn controller(dir: &tempfile::TempDir, systemd: Arc<FakeRunner>, docker: Arc<FakeRunner>) -> Controller {
+        controller_with_script(dir, systemd, docker, Arc::default())
+    }
+
+    fn controller_with_script(
+        dir: &tempfile::TempDir,
+        systemd: Arc<FakeRunner>,
+        docker: Arc<FakeRunner>,
+        script: Arc<FakeRunner>,
+    ) -> Controller {
         let registry = Registry::load(dir.path().join("services.toml")).unwrap();
         registry
             .merge(vec![
                 Service::new("web", [(Backend::Systemd, "web".into()), (Backend::Docker, "web".into())]).unwrap(),
                 Service::new("db", [(Backend::Docker, "postgres".into())]).unwrap(),
+                Service::new(
+                    "blog",
+                    [
+                        (Backend::Systemd, "blog-api".into()),
+                        (Backend::Docker, "my-dashboard".into()),
+                        (Backend::Script, "blog-restart".into()),
+                    ],
+                )
+                .unwrap(),
             ])
             .unwrap();
 
-        let backends = Backends { systemd: SystemdAdapter::new(systemd), docker: DockerAdapter::new(docker) };
+        let backends = Backends {
+            systemd: SystemdAdapter::new(systemd),
+            docker: DockerAdapter::new(docker),
+            script: ScriptAdapter::new(script),
+        };
         Controller::new(registry, backends)
+    }
+
+    #[tokio::test]
+    async fn restart_runs_script_and_reports_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = Arc::new(FakeRunner::with_results([
+            ok("LoadState=loaded\nActiveState=inactive\n"),
+            fail(1, "", "Job failed."),
+            ok("[停止] npm run build\n"),
+        ]));
+        let systemd = Arc::new(FakeRunner::default());
+        let docker = Arc::new(FakeRunner::default());
+        let c = controller_with_script(&dir, systemd.clone(), docker.clone(), script.clone());
+
+        let results = c.control("blog", Action::Restart, None).await.unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!((results[0].backend, results[0].success), (Backend::Script, false));
+        assert_eq!(results[0].message, "Job failed.\n\n[停止] npm run build");
+        assert!(systemd.calls().is_empty() && docker.calls().is_empty());
+
+        // stop 仍然直接操作 systemd 與 docker，不會執行腳本
+        c.control("blog", Action::Stop, None).await.unwrap();
+        assert_eq!(script.calls().len(), 3);
+        assert_eq!(docker.calls().len(), 1);
     }
 
     #[tokio::test]

@@ -3,17 +3,20 @@
 //! 一律以參數陣列直接執行、不經過 shell；逾時會終止子程序。
 
 mod docker;
+mod script;
 mod systemd;
 
 use std::future::Future;
 use std::io::Read;
 use std::pin::Pin;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::process::Command;
 
 pub use docker::DockerAdapter;
+pub use script::{ScriptAdapter, unit_name as script_unit_name};
 pub use systemd::SystemdAdapter;
 
 use crate::model::{Action, Backend, ValidationError, validate_target};
@@ -22,6 +25,8 @@ pub const MAX_LOG_LINES: u32 = 500;
 pub const QUERY_TIMEOUT: Duration = Duration::from_secs(15);
 /// systemctl start / stop 會等待工作完成，給較長的時間
 pub const CONTROL_TIMEOUT: Duration = Duration::from_secs(120);
+/// 腳本可能包含建置等較久的步驟；Discord 的互動回覆最多只能等 15 分鐘
+pub const SCRIPT_TIMEOUT: Duration = Duration::from_secs(14 * 60);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandResult {
@@ -159,13 +164,24 @@ fn clamp_lines(lines: u32) -> u32 {
 pub struct Backends {
     pub systemd: SystemdAdapter,
     pub docker: DockerAdapter,
+    pub script: ScriptAdapter,
 }
 
 impl Backends {
+    pub fn new(runner: Arc<dyn Runner>) -> Self {
+        Self {
+            systemd: SystemdAdapter::new(runner.clone()),
+            docker: DockerAdapter::new(runner.clone()),
+            script: ScriptAdapter::new(runner),
+        }
+    }
+
     pub async fn control(&self, backend: Backend, action: Action, target: &str) -> CommandResult {
         match backend {
             Backend::Systemd => self.systemd.control(action, target).await,
             Backend::Docker => self.docker.control(action, target).await,
+            Backend::Script if action == Action::Restart => self.script.run(target).await,
+            Backend::Script => CommandResult::failed(ValidationError::ScriptActionUnsupported.to_string()),
         }
     }
 
@@ -173,6 +189,7 @@ impl Backends {
         match backend {
             Backend::Systemd => self.systemd.state(target).await,
             Backend::Docker => self.docker.state(target).await,
+            Backend::Script => self.script.state(target).await,
         }
     }
 
@@ -180,6 +197,7 @@ impl Backends {
         match backend {
             Backend::Systemd => self.systemd.logs(target, lines).await,
             Backend::Docker => self.docker.logs(target, lines).await,
+            Backend::Script => self.script.logs(target, lines).await,
         }
     }
 }

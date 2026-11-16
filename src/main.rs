@@ -2,7 +2,7 @@ use std::io::IsTerminal;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use service_controller::backend::{Backends, DockerAdapter, ProcessRunner, SystemdAdapter};
+use service_controller::backend::{Backends, ProcessRunner};
 use service_controller::controller::Controller;
 use service_controller::discord::{self, Data};
 use service_controller::permissions::Policy;
@@ -39,8 +39,7 @@ async fn run() -> Result<(), discord::Error> {
         settings.allowed_guilds.clone(),
     )?;
 
-    let runner = Arc::new(ProcessRunner);
-    let backends = Backends { systemd: SystemdAdapter::new(runner.clone()), docker: DockerAdapter::new(runner) };
+    let backends = Backends::new(Arc::new(ProcessRunner));
 
     let data = Data { controller: Controller::new(registry, backends), policy };
 

@@ -243,4 +243,5 @@ cat <<EOF
 
     還沒做的話，請到 Discord Developer Portal → Bot 開啟「MESSAGE CONTENT INTENT」，
     之後在 Discord 用 !services 設定要控制的服務。
+    要讓 /service restart 執行重啟腳本：sudo ./scripts/register-script.sh add <名稱> --user <使用者> -- <腳本>
 EOF
