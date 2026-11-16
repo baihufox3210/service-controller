@@ -43,6 +43,17 @@ sudo ./scripts/install.sh
 5. 偵測並移除舊版的 Docker 部署
 6. 安裝並啟動 systemd 服務 `service-controller`
 
+### 從舊版（Python + Docker）移植
+
+`scripts/migrate.sh` 會讀取舊版 `.env`、把舊的服務清單與權限轉換成新版格式、刪除舊版的容器／volume／映像檔／AppArmor profile 與程式碼，接著下載新版並安裝、匯入資料：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/baihufox3210/service-controller/master/scripts/migrate.sh -o /tmp/migrate.sh
+sudo bash /tmp/migrate.sh /data/projects/service-controller
+```
+
+舊設定與匯出的資料會備份在 `/root/service-controller-migration-<時間>`，確認沒問題後可以刪除。
+
 ## 維護
 
 | 要做的事 | 指令 |

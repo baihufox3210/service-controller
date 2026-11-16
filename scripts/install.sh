@@ -68,7 +68,8 @@ current_value() {
 
 ask() {
     local prompt="$1" default="$2" secret="${3:-0}" value
-    if [[ ! -t 0 ]]; then
+    # 非互動或 --yes 模式直接使用預設值（環境變數、既有設定或舊版 .env）
+    if [[ ! -t 0 || $ASSUME_YES -eq 1 ]]; then
         printf '%s' "$default"
         return
     fi
@@ -156,12 +157,12 @@ else
 
     while owners="$(ask "擁有者的 Discord 使用者 ID（逗號分隔，留空則使用應用程式擁有者）" "$owners")"; ! valid_ids "$owners"; do
         warn "只能輸入數字 ID，以逗號分隔"
-        [[ -t 0 ]] || die "OWNER_USER_IDS 格式錯誤"
+        [[ -t 0 && $ASSUME_YES -eq 0 ]] || die "OWNER_USER_IDS 格式錯誤"
     done
 
     while guilds="$(ask "允許使用的伺服器 ID（逗號分隔，留空表示不限制）" "$guilds")"; ! valid_ids "$guilds"; do
         warn "只能輸入數字 ID，以逗號分隔"
-        [[ -t 0 ]] || die "ALLOWED_GUILD_IDS 格式錯誤"
+        [[ -t 0 && $ASSUME_YES -eq 0 ]] || die "ALLOWED_GUILD_IDS 格式錯誤"
     done
 
     prefix="$(ask "前綴指令的符號" "${prefix:-!}")"
