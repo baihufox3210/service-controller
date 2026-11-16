@@ -1,10 +1,8 @@
-// /etc/polkit-1/rules.d/50-service-controller.rules
-// 允許容器內的 svcbot（UID 10001）透過 D-Bus 操作主機上所有 systemd unit。
-// 實際能操作哪些服務，由 Discord 中以 /service add 註冊的服務決定。
-// 主機上需要有同 UID 的使用者：
-//   sudo useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin svcbot
+// /etc/polkit-1/rules.d/50-service-controller.rules（由 scripts/install.sh 安裝）
+// 允許執行機器人的 svcbot 使用者透過 D-Bus 操作 systemd unit。
+// 實際能操作哪些服務，由 Discord 中 !services 設定的服務決定。
 //
-// ⚠️ 這等同讓 svcbot 擁有主機 root 權限，請妥善保護 BOT_TOKEN。
+// 這等同讓 svcbot 擁有主機 root 權限，請妥善保護 Discord Bot Token。
 
 var BOT_USER = "svcbot";
 

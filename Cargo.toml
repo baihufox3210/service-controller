@@ -1,0 +1,25 @@
+[package]
+name = "service-controller"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.87"
+description = "Discord bot for controlling systemd services and Docker containers with role-based access control"
+license = "MIT"
+publish = false
+
+[dependencies]
+poise = "0.7.1"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "time", "sync", "fs", "io-util", "signal"] }
+toml = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

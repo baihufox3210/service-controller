@@ -1,0 +1,45 @@
+[Unit]
+Description=Service Controller Discord Bot
+Documentation=https://github.com/baihufox3210/service-controller
+After=network-online.target docker.service polkit.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=svcbot
+Group=svcbot
+EnvironmentFile=/etc/service-controller/service-controller.env
+Environment=HOME=/var/lib/service-controller
+ExecStart=/usr/local/bin/service-controller
+Restart=on-failure
+RestartSec=5
+
+# 服務與權限設定存放在 /var/lib/service-controller（STATE_DIRECTORY）
+StateDirectory=service-controller
+StateDirectoryMode=0700
+UMask=0077
+
+# 沙箱強化：systemd 操作透過 D-Bus 由主機的 polkit 授權，Docker 透過 docker 群組，不需要任何特權
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
